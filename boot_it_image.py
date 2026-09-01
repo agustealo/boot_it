@@ -61,6 +61,7 @@ def _has_valid_mbr_partition_table(first_sector: bytes, image_size: int) -> bool
     if len(first_sector) < SECTOR_SIZE or first_sector[510:512] != b"\x55\xaa":
         return False
     total_sectors = image_size // SECTOR_SIZE
+    has_partition = False
     for index in range(4):
         entry = first_sector[446 + index * 16 : 462 + index * 16]
         if len(entry) != 16:
@@ -70,13 +71,14 @@ def _has_valid_mbr_partition_table(first_sector: bytes, image_size: int) -> bool
         sectors = int.from_bytes(entry[12:16], "little")
         if partition_type == 0 or sectors == 0:
             continue
+        has_partition = True
         if start_lba >= total_sectors:
             return False
         # Protective GPT entries may describe the whole virtual disk and are
-        # allowed to end exactly at the image boundary.
+        # allowed to use the legacy 32-bit maximum sector count.
         if partition_type != 0xEE and start_lba + sectors > total_sectors:
             return False
-    return True
+    return has_partition
 
 
 def _inspect_gpt(handle, image_size: int) -> tuple[bool, str]:
@@ -149,8 +151,6 @@ def _inspect_optical_descriptors(handle, image_size: int) -> tuple[bool, bool, b
                 break
         elif identifier in UDF_SIGNATURES:
             udf = True
-        # UDF volume-recognition descriptors also store the five-byte ID at
-        # byte 1. Keep scanning because hybrid ISO/UDF images are common.
     return iso9660, udf, el_torito
 
 
@@ -208,7 +208,7 @@ def inspect_image(path: str) -> ImageInspection:
         fatal_reason = fatal_reason or "The .iso file has no recognizable ISO9660/UDF volume descriptor."
     elif extension == ".img" and image_format == "raw image":
         warning = "no recognized partition table or filesystem signature"
-    if mbr_signature and not mbr_valid and not gpt_signature:
+    if mbr_signature and not mbr_valid and not gpt_signature and not filesystem_hint:
         fatal_reason = fatal_reason or "The image has an invalid MBR partition table."
 
     return ImageInspection(
