@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 import re
+import struct
 import subprocess
 import time
 import threading
 from pathlib import Path
 from types import ModuleType
 from typing import Callable
+
+from boot_it_image import inspect_image
 
 
 def _fixed_linux_write(
@@ -17,13 +20,7 @@ def _fixed_linux_write(
     progress_callback: Callable[[int, int], None],
     cancel_event: threading.Event,
 ) -> None:
-    """Run dd with a binary nonblocking stderr reader safe on Python 3.10+.
-
-    TextIOWrapper cannot safely sit on a nonblocking descriptor because the
-    incremental decoder may receive ``None`` when no bytes are available.
-    Reading bytes with ``os.read`` keeps EAGAIN separate from decoding and lets
-    cancellation polling continue without corrupting decoder state.
-    """
+    """Run dd with a binary nonblocking stderr reader safe on Python 3.10+."""
     command = core._dd_command(image, device)
     total = Path(image).stat().st_size
     process = subprocess.Popen(
@@ -78,8 +75,49 @@ def _fixed_linux_write(
             core._terminate_process_group(process)
 
 
+def _install_image_intelligence(core: ModuleType) -> None:
+    if not hasattr(core, "_boot_it_original_validate_image"):
+        core._boot_it_original_validate_image = core.validate_image
+    original_validate = core._boot_it_original_validate_image
+
+    def validate_image(path: str) -> tuple[bool, str]:
+        valid, reason = original_validate(path)
+        if not valid:
+            return valid, reason
+        try:
+            inspection = inspect_image(path)
+        except (OSError, ValueError, struct.error) as exc:
+            return False, f"Unable to inspect image structure: {exc}"
+        if inspection.fatal_reason:
+            return False, f"Image structure check failed: {inspection.fatal_reason}"
+        return True, ""
+
+    core.validate_image = validate_image
+
+    window_type = getattr(core, "BootItWindow", None)
+    if window_type is None:
+        return
+    if not hasattr(window_type, "_boot_it_original_hash_ready"):
+        window_type._boot_it_original_hash_ready = window_type._hash_ready
+    original_hash_ready = window_type._boot_it_original_hash_ready
+
+    def hash_ready(self, path: str, digest: str) -> None:
+        original_hash_ready(self, path, digest)
+        if path != self.image_edit.text():
+            return
+        try:
+            inspection = inspect_image(path)
+        except (OSError, ValueError, struct.error):
+            return
+        digest_text = digest or "unavailable"
+        self.hash_label.setText(f"SHA-256: {digest_text}\nImage: {inspection.summary}")
+        self.hash_label.setToolTip(inspection.warning)
+
+    window_type._hash_ready = hash_ready
+
+
 def install_runtime_patches(core: ModuleType) -> None:
-    """Install narrowly-scoped runtime fixes before the GUI starts."""
+    """Install mandatory runtime hardening before the GUI starts."""
 
     def linux_write(
         image: str,
@@ -90,3 +128,4 @@ def install_runtime_patches(core: ModuleType) -> None:
         _fixed_linux_write(core, image, device, progress_callback, cancel_event)
 
     core.linux_write = linux_write
+    _install_image_intelligence(core)
