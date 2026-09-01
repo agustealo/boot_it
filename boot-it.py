@@ -21,9 +21,11 @@ def _launcher_parser() -> argparse.ArgumentParser:
 def load_application_main() -> Callable[[Sequence[str] | None], int]:
     """Load the application only after installing mandatory runtime hardening."""
     import boot_it as core
+    from boot_it_auth_runtime import install_openpgp_authenticity
     from boot_it_runtime import install_runtime_patches
 
     install_runtime_patches(core)
+    install_openpgp_authenticity(core)
     return core.main
 
 
