@@ -1,148 +1,111 @@
 # Boot It
 
-**Boot It** is an intuitive tool for creating bootable USB drives. Whether you're an IT pro or just looking to install a fresh OS, Boot It handles the technical details so you don't have to. One password per session, real-time USB detection, and a beautiful dark mode make it the go-to tool for booting bliss.
+Boot It is a desktop utility for writing bootable ISO and IMG images to removable USB media on Linux and Windows. The current implementation prioritizes target-device safety, native device discovery, explicit destructive-write confirmation, and byte-for-byte post-write verification.
 
----
+## Current capabilities
 
-## Features
+- Linux USB discovery through `lsblk` with removable/USB transport filtering.
+- Windows USB discovery through PowerShell `Get-Disk`; Boot It does not depend on deprecated WMIC.
+- System, read-only, and otherwise unsafe targets are blocked before writing.
+- Image capacity is checked against the target device before destructive operations begin.
+- Linux writes use `dd` with `conv=fsync`, elevated through PolicyKit (`pkexec`) when necessary.
+- Windows writes target the selected `\\.\PhysicalDriveN` device and require Administrator privileges.
+- Mounted target volumes are dismounted before raw writing.
+- Every successful write is verified byte-for-byte against the source image.
+- SHA-256 is calculated for the selected image so users can compare it with a publisher-provided checksum.
+- Long-running write and hashing work executes off the GUI thread.
+- Logs are stored at `~/.boot_it/boot_it.log`.
 
-- **Session Password Management**: (Linux) Boot It requests your sudo password **only once** per session. No more interruptions!
-- **Real-Time USB Detection**: USBs are automatically detected and updated without any manual refresh.
-- **Dark Mode**: Dark mode is on by default. Switch it off if you're feeling the light-side vibes.
-- **Detailed Progress Tracking**: Track progress in real-time with visual and textual feedback. No more guesswork!
-- **Cross-Platform**: Compatible with both Linux and Windows, Boot It works across platforms seamlessly.
+## Supported platforms
 
----
+### Linux
 
-## Why Boot It?
+Boot It expects a modern Linux userspace with:
 
-### Simple Yet Powerful
+- Python 3.10 or newer
+- `lsblk`, `findmnt`, `dd`, `cmp`
+- `udisksctl` when available for normal unmounting
+- `pkexec`/PolicyKit when raw-device elevation is required
 
-Boot It is designed with everyone in mind. Whether you’re tech-savvy or not, its intuitive UI ensures you won’t get lost in complex processes.
+### Windows
 
-### Password Simplicity (Linux)
-Tired of entering your sudo password over and over again? We feel you! Boot It stores it securely for the session and lets you focus on the task at hand.
+Boot It expects:
 
-### Real-Time USB Detection
-Once your bootable USB is ready, Boot It detects and updates it on the fly—no manual effort needed.
+- Windows 10/11 with PowerShell
+- Python 3.10 or newer
+- Administrator privileges when writing physical USB media
 
----
-
-## Use Cases
-
-### 1. **Operating System Installations**
-Create bootable USBs for Windows, Linux, or any other OS quickly and painlessly.
-
-### 2. **System Admins/IT Pros**
-Managing several systems? Boot It helps with multiple USB creations, offering real-time progress updates and post-creation USB detection.
-
-### 3. **Tech Enthusiasts**
-Boot It is ideal for creating multi-purpose bootable drives with future support for multi-ISO boot coming soon!
-
----
-
-## Tech Stack
-
-Here’s what powers Boot It:
-
-- **PyQt5**: Provides the polished and responsive user interface.
-- **Subprocess Module**: Manages all the low-level system commands required for disk formatting and writing.
-- **pyudev**: For real-time USB detection on Linux.
-- **Logging**: Full logging of every step, stored in `boot_it.log`, for troubleshooting or tracking the process.
-- **Cross-Platform**: Works on both Linux and Windows, handling OS-specific disk operations behind the scenes.
-
----
+macOS is not currently implemented and is intentionally reported as unsupported rather than silently pretending otherwise.
 
 ## Installation
 
-### Linux
-1. Clone the repo:
-   ```bash
-   git clone https://github.com/agustealo/boot-it.git
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Run the app:
-   ```bash
-   python3 main.py
-   ```
+```bash
+git clone https://github.com/agustealo/boot_it.git
+cd boot_it
+python -m pip install -r requirements.txt
+```
 
-### Windows
-1. Clone the repo:
-   ```bash
-   git clone https://github.com/agustealo/boot-it.git
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Run the app:
-   ```bash
-   python main.py
-   ```
+Run either entry point:
 
----
+```bash
+python boot_it.py
+```
 
-## How to Use
+or:
 
-1. **Launch Boot It**: Once you run the application, the main window will open.
-2. **Select ISO**: Choose the ISO you want to burn to your USB.
-3. **Choose USB**: Select the USB device you want to create the bootable drive on.
-4. **Create Bootable USB**: Click the "Create Bootable USB" button, enter your password (Linux only), and let Boot It handle the rest!
+```bash
+python boot-it.py
+```
 
----
+On Windows, launch the terminal or packaged application with Administrator privileges before writing USB media.
 
-## Roadmap
+## Safe usage
 
-- **Multi-ISO Boot Support**: Coming soon, you'll be able to store multiple OS images on a single USB drive.
-- **Advanced Error Diagnostics**: Adding enhanced error logs with troubleshooting recommendations.
+1. Download the ISO/IMG from the operating-system or software publisher.
+2. Compare Boot It's displayed SHA-256 digest with the publisher's official checksum when one is available.
+3. Insert the target USB drive and press **Refresh** if needed.
+4. Confirm the exact model, device identifier, and capacity shown by Boot It.
+5. Press **Write and verify**.
+6. Boot It dismounts the target, writes the image, flushes it, and verifies the written bytes against the source.
 
----
+Writing an image destroys the existing contents of the selected USB device. System disks are excluded from the writable target set, but the final device confirmation remains an important safety boundary.
 
-## Contributing
+## Development
 
-We welcome contributions from anyone! Whether it's bug reports, feature requests, or pull requests, we'd love to collaborate with the community. Follow these steps to get started:
+Install development dependencies:
 
-### Steps to Contribute:
-1. Fork the repository.
-2. Create a new branch (`git checkout -b feature/your-feature`).
-3. Commit your changes (`git commit -m 'Add some feature'`).
-4. Push to the branch (`git push origin feature/your-feature`).
-5. Open a pull request.
+```bash
+python -m pip install -r requirements-dev.txt
+```
 
-### Code of Conduct:
-Please adhere to the [Contributor Covenant](https://www.contributor-covenant.org/) when interacting with others in this project.
+Run the quality checks:
 
----
+```bash
+python -m compileall -q boot_it.py boot-it.py tests
+python -m pytest -q
+```
+
+The GitHub Actions quality workflow runs those checks on Python 3.10, 3.12, and 3.14.
+
+## Architecture notes
+
+The project deliberately uses native disk inventory instead of parsing human-oriented command output such as legacy WMIC tables. Platform-specific destructive operations are isolated behind explicit Linux/Windows functions, while validation, device metadata, hashing, progress reporting, and the GUI remain shared.
+
+Boot It currently performs direct image writes. Multi-ISO operation is a different product mode and should be implemented as an explicit, separately tested feature rather than layered implicitly onto raw-image writing.
+
+## Near-term hardening roadmap
+
+- Package signed Windows and Linux releases instead of requiring users to run from source.
+- Add hardware-backed integration tests using disposable virtual/removable disks.
+- Add image-format introspection and publisher-checksum retrieval where a trustworthy upstream metadata source exists.
+- Add explicit write cancellation with verified child-process termination semantics.
+- Add macOS disk discovery/unmount/raw-write support only after the same target-safety and verification guarantees are implemented.
+- Evaluate a separate Ventoy-style multi-image mode instead of weakening the verified single-image workflow.
 
 ## License
 
-**Boot It** is licensed under the MIT License. See the [LICENSE](LICENSE) file for more information.
+Boot It is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See [`LICENSE`](LICENSE).
 
----
+## Contributing
 
-## Contributors
-
-Boot It is made possible thanks to the contributions of the following awesome people:
-
-- **Agustealo** – Initial development and overall project guidance.
-- **Zeus Eternal** – Special adaptations
-- **The Open-Source Community** – For bug reports, suggestions, and improvements.
-
----
-
-## Support
-
-For any questions, issues, or just to chat with the dev team, feel free to:
-- Open an issue on GitHub.
-- Reach out via [agustealo@gmail.com](mailto:agustealo@gmail.com).
-  
-We’re always happy to help!
-
----
-
-## Conclusion
-
-Boot It is designed to make your life easier. Whether you're creating bootable USBs for an OS installation or for your tech projects, Boot It offers ease of use, reliability, and a dash of fun. Get booting—fast and painless—with Boot It!
+Pull requests should preserve the safety invariants: never expose a known system disk as writable, never claim success before verification completes, never accept a target larger/smaller mismatch silently, and never reintroduce password capture into the application process.
