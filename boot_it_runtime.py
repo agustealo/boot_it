@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import struct
 import subprocess
 import time
 import threading
@@ -85,7 +86,7 @@ def _install_image_intelligence(core: ModuleType) -> None:
             return valid, reason
         try:
             inspection = inspect_image(path)
-        except (OSError, ValueError, struct_error_types()) as exc:
+        except (OSError, ValueError, struct.error) as exc:
             return False, f"Unable to inspect image structure: {exc}"
         if inspection.fatal_reason:
             return False, f"Image structure check failed: {inspection.fatal_reason}"
@@ -106,23 +107,13 @@ def _install_image_intelligence(core: ModuleType) -> None:
             return
         try:
             inspection = inspect_image(path)
-        except (OSError, ValueError):
+        except (OSError, ValueError, struct.error):
             return
         digest_text = digest or "unavailable"
         self.hash_label.setText(f"SHA-256: {digest_text}\nImage: {inspection.summary}")
-        if inspection.warning:
-            self.hash_label.setToolTip(inspection.warning)
-        else:
-            self.hash_label.setToolTip("")
+        self.hash_label.setToolTip(inspection.warning)
 
     window_type._hash_ready = hash_ready
-
-
-def struct_error_types() -> tuple[type[BaseException], ...]:
-    """Late import helper keeps the runtime module's import surface minimal."""
-    import struct
-
-    return (struct.error,)
 
 
 def install_runtime_patches(core: ModuleType) -> None:
