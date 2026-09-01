@@ -29,16 +29,22 @@ def _sha256(path: Path) -> str:
 
 @pytest.fixture()
 def hardened_core():
-    original_linux_write = core.linux_write
-    original_validate_image = core.validate_image
-    original_hash_ready = core.BootItWindow._hash_ready
+    originals = {
+        "linux_write": core.linux_write,
+        "validate_image": core.validate_image,
+        "build_ui": core.BootItWindow._build_ui,
+        "hash_ready": core.BootItWindow._hash_ready,
+        "start_write": core.BootItWindow.start_write,
+    }
     install_runtime_patches(core)
     try:
         yield core
     finally:
-        core.linux_write = original_linux_write
-        core.validate_image = original_validate_image
-        core.BootItWindow._hash_ready = original_hash_ready
+        core.linux_write = originals["linux_write"]
+        core.validate_image = originals["validate_image"]
+        core.BootItWindow._build_ui = originals["build_ui"]
+        core.BootItWindow._hash_ready = originals["hash_ready"]
+        core.BootItWindow.start_write = originals["start_write"]
 
 
 @pytest.fixture()
