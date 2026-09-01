@@ -8,7 +8,8 @@ from boot_it_runtime import install_runtime_patches
 
 
 def _minimal_iso(path: Path) -> None:
-    payload = bytearray(40 * ISO_SECTOR_SIZE)
+    # Keep the fixture above Boot It's existing 1 MiB minimum-image sanity floor.
+    payload = bytearray(600 * ISO_SECTOR_SIZE)
     primary = bytearray(ISO_SECTOR_SIZE)
     primary[0] = 1
     primary[1:6] = b"CD001"
