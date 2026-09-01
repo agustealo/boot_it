@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from boot_it import OperationCancelled, linux_verify, linux_write
+import boot_it as core
+from boot_it_runtime import install_runtime_patches
+
+install_runtime_patches(core)
+OperationCancelled = core.OperationCancelled
+linux_verify = core.linux_verify
+linux_write = core.linux_write
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("BOOT_IT_LOOPBACK_TESTS") != "1",
