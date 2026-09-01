@@ -1,6 +1,6 @@
 # Boot It
 
-Boot It is a desktop utility for writing bootable ISO and IMG images to removable USB media on Linux and Windows. The current implementation prioritizes target-device safety, native device discovery, explicit destructive-write confirmation, identity revalidation, cancellation safety, byte-for-byte post-write verification, and reproducible release candidates.
+Boot It is a desktop utility for writing bootable ISO and IMG images to removable USB media on Linux and Windows. The current implementation prioritizes target-device safety, native device discovery, explicit destructive-write confirmation, identity revalidation, cancellation safety, byte-for-byte post-write verification, kernel-backed integration proof, and reproducible release candidates.
 
 ## Current capabilities
 
@@ -16,6 +16,7 @@ Boot It is a desktop utility for writing bootable ISO and IMG images to removabl
 - Active writes and verification can be cancelled. Linux child process groups are terminated; Windows loops stop cooperatively at chunk boundaries.
 - Cancelled writes are explicitly reported as partial/unverified media and are never presented as successful.
 - Every successful write is verified byte-for-byte against the source image.
+- Linux raw-write behavior is exercised against disposable kernel loop devices in CI, including corruption detection and cancellation.
 - SHA-256 is calculated for the selected image so users can compare it with a publisher-provided checksum.
 - Long-running write and hashing work executes off the GUI thread.
 - Windows and Linux GUI executables are built in CI from a pinned PyInstaller toolchain.
@@ -50,19 +51,10 @@ macOS is not currently implemented and is intentionally reported as unsupported 
 git clone https://github.com/agustealo/boot_it.git
 cd boot_it
 python -m pip install -r requirements.txt
-```
-
-Run either entry point:
-
-```bash
-python boot_it.py
-```
-
-or:
-
-```bash
 python boot-it.py
 ```
+
+`boot-it.py` is the **canonical application entry point**. It installs the hardened runtime layer before Qt starts and is also the entry point used by packaged releases. `boot_it.py` is the internal application module and is not a supported direct launcher.
 
 On Windows, launch the terminal or packaged application with Administrator privileges before writing USB media.
 
@@ -110,12 +102,12 @@ python -m pip install -r requirements-dev.txt
 Run the quality checks:
 
 ```bash
-python -m compileall -q boot_it.py boot-it.py boot_it_meta.py scripts tests
+python -m compileall -q boot_it.py boot-it.py boot_it_meta.py boot_it_runtime.py scripts tests
 python -m pytest -q
 python -m pip_audit -r requirements.txt
 ```
 
-The GitHub Actions quality workflow runs compile/tests on Python 3.10, 3.12, and 3.14. The package workflow independently audits dependencies, builds frozen applications, executes the packaged self-test, and generates checksums/manifests on Windows and Linux.
+The GitHub Actions quality workflow runs compile/tests on Python 3.10, 3.12, and 3.14. The package workflow independently audits dependencies, builds frozen applications, executes the packaged self-test, and generates checksums/manifests on Windows and Linux. The dedicated loopback workflow additionally validates the Linux destructive path against disposable kernel block devices.
 
 ## Architecture notes
 
@@ -123,15 +115,18 @@ The project deliberately uses native disk inventory instead of parsing human-ori
 
 A device path such as `/dev/sdb` or `\\.\PhysicalDrive2` is treated as a location, not a durable identity. Boot It captures a fingerprint when the target is selected and rebuilds it from fresh OS inventory immediately before destructive work. This prevents a removed/reinserted or replacement device from inheriting an earlier safety decision merely because the operating system reused the same path.
 
+The canonical launcher installs a narrow runtime hardening layer before application startup. This keeps release diagnostics independent of Qt and ensures packaged/source launches use the same corrected Linux nonblocking writer behavior. The internal `boot_it.py` module should be imported through that launcher contract rather than executed as an alternate application entry point.
+
 Release diagnostics intentionally live outside the Qt module so CI can prove that a frozen executable starts and contains the expected release metadata without opening the GUI or touching a disk.
 
 Boot It currently performs direct image writes. Multi-ISO operation is a different product mode and should be implemented as an explicit, separately tested feature rather than layered implicitly onto raw-image writing.
 
 ## Near-term hardening roadmap
 
-- Add real Windows code signing and Linux artifact signing with CI verification once signing credentials are provisioned.
-- Add hardware-backed integration tests using disposable virtual/removable disks.
+- Fold the Linux writer hardening into a dedicated core I/O module so runtime patch installation is no longer necessary.
 - Add image-format introspection and publisher-checksum retrieval where a trustworthy upstream metadata source exists.
+- Add real Windows code signing and Linux artifact signing with CI verification once signing credentials are provisioned.
+- Add dedicated physical-USB qualification for controller behavior, surprise removal, UAS/usb-storage differences, and real BIOS/UEFI boot proof.
 - Add macOS disk discovery/unmount/raw-write support only after the same target-safety and verification guarantees are implemented.
 - Evaluate a separate Ventoy-style multi-image mode instead of weakening the verified single-image workflow.
 
