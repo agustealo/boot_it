@@ -30,9 +30,11 @@ def launcher(argv: list[str] | None = None) -> int:
         write_self_test(known.self_test)
         return 0
 
-    from boot_it import main
+    import boot_it as core
+    from boot_it_runtime import install_runtime_patches
 
-    return main([sys.argv[0], *args])
+    install_runtime_patches(core)
+    return core.main([sys.argv[0], *args])
 
 
 if __name__ == "__main__":
