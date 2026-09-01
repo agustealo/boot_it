@@ -45,12 +45,19 @@ def test_canonical_launcher_diagnostics_are_machine_readable() -> None:
 
 
 def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
-    original = boot_it.linux_write
+    original_linux_write = boot_it.linux_write
+    original_validate_image = boot_it.validate_image
+    original_hash_ready = boot_it.BootItWindow._hash_ready
     module = _load_launcher_module()
     application_main = module.load_application_main()
     try:
         assert application_main is boot_it.main
-        assert boot_it.linux_write is not original
+        assert boot_it.linux_write is not original_linux_write
         assert boot_it.linux_write.__module__ == "boot_it_runtime"
+        assert boot_it.validate_image is not original_validate_image
+        assert boot_it.validate_image.__module__ == "boot_it_runtime"
+        assert boot_it.BootItWindow._hash_ready is not original_hash_ready
     finally:
-        boot_it.linux_write = original
+        boot_it.linux_write = original_linux_write
+        boot_it.validate_image = original_validate_image
+        boot_it.BootItWindow._hash_ready = original_hash_ready
