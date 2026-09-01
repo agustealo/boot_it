@@ -13,11 +13,6 @@ import pytest
 import boot_it as core
 from boot_it_runtime import install_runtime_patches
 
-install_runtime_patches(core)
-OperationCancelled = core.OperationCancelled
-linux_verify = core.linux_verify
-linux_write = core.linux_write
-
 pytestmark = pytest.mark.skipif(
     os.environ.get("BOOT_IT_LOOPBACK_TESTS") != "1",
     reason="destructive loopback tests require BOOT_IT_LOOPBACK_TESTS=1",
@@ -30,6 +25,20 @@ def _sha256(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+@pytest.fixture()
+def hardened_core():
+    original_linux_write = core.linux_write
+    original_validate_image = core.validate_image
+    original_hash_ready = core.BootItWindow._hash_ready
+    install_runtime_patches(core)
+    try:
+        yield core
+    finally:
+        core.linux_write = original_linux_write
+        core.validate_image = original_validate_image
+        core.BootItWindow._hash_ready = original_hash_ready
 
 
 @pytest.fixture()
@@ -55,6 +64,7 @@ def loop_device(tmp_path: Path):
 def test_linux_write_and_verify_against_kernel_loop_device(
     tmp_path: Path,
     loop_device,
+    hardened_core,
 ) -> None:
     device, backing = loop_device
     source = tmp_path / "source.img"
@@ -66,13 +76,13 @@ def test_linux_write_and_verify_against_kernel_loop_device(
     progress: list[tuple[int, int]] = []
     cancel_event = threading.Event()
 
-    linux_write(
+    hardened_core.linux_write(
         str(source),
         str(device),
         lambda done, total: progress.append((done, total)),
         cancel_event,
     )
-    linux_verify(str(source), str(device), cancel_event)
+    hardened_core.linux_verify(str(source), str(device), cancel_event)
 
     with backing.open("rb") as handle:
         written = handle.read(source.stat().st_size)
@@ -81,13 +91,13 @@ def test_linux_write_and_verify_against_kernel_loop_device(
     assert progress[-1][0] <= progress[-1][1]
 
 
-def test_linux_verify_detects_corruption(tmp_path: Path, loop_device) -> None:
+def test_linux_verify_detects_corruption(tmp_path: Path, loop_device, hardened_core) -> None:
     device, backing = loop_device
     source = tmp_path / "source.img"
     source.write_bytes(os.urandom(8 * 1024 * 1024))
     cancel_event = threading.Event()
 
-    linux_write(str(source), str(device), lambda *_: None, cancel_event)
+    hardened_core.linux_write(str(source), str(device), lambda *_: None, cancel_event)
 
     with backing.open("r+b") as handle:
         handle.seek(1024 * 1024)
@@ -98,10 +108,10 @@ def test_linux_verify_detects_corruption(tmp_path: Path, loop_device) -> None:
         os.fsync(handle.fileno())
 
     with pytest.raises(subprocess.CalledProcessError):
-        linux_verify(str(source), str(device), cancel_event)
+        hardened_core.linux_verify(str(source), str(device), cancel_event)
 
 
-def test_linux_write_cancellation_terminates_writer(tmp_path: Path, loop_device) -> None:
+def test_linux_write_cancellation_terminates_writer(tmp_path: Path, loop_device, hardened_core) -> None:
     device, _ = loop_device
     source = tmp_path / "source.img"
     source.write_bytes(os.urandom(64 * 1024 * 1024))
@@ -110,7 +120,7 @@ def test_linux_write_cancellation_terminates_writer(tmp_path: Path, loop_device)
 
     def run() -> None:
         try:
-            linux_write(str(source), str(device), lambda *_: None, cancel_event)
+            hardened_core.linux_write(str(source), str(device), lambda *_: None, cancel_event)
         except BaseException as exc:  # captured for assertion from worker thread
             outcome.append(exc)
 
@@ -122,4 +132,4 @@ def test_linux_write_cancellation_terminates_writer(tmp_path: Path, loop_device)
 
     assert not worker.is_alive(), "cancelled dd process did not terminate"
     if outcome:
-        assert isinstance(outcome[0], OperationCancelled)
+        assert isinstance(outcome[0], hardened_core.OperationCancelled)
