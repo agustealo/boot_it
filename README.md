@@ -1,6 +1,6 @@
 # Boot It
 
-Boot It is a desktop utility for writing bootable ISO and IMG images to removable USB media on Linux and Windows. The current implementation prioritizes target-device safety, native device discovery, explicit destructive-write confirmation, identity revalidation, cancellation safety, and byte-for-byte post-write verification.
+Boot It is a desktop utility for writing bootable ISO and IMG images to removable USB media on Linux and Windows. The current implementation prioritizes target-device safety, native device discovery, explicit destructive-write confirmation, identity revalidation, cancellation safety, byte-for-byte post-write verification, and reproducible release candidates.
 
 ## Current capabilities
 
@@ -18,6 +18,9 @@ Boot It is a desktop utility for writing bootable ISO and IMG images to removabl
 - Every successful write is verified byte-for-byte against the source image.
 - SHA-256 is calculated for the selected image so users can compare it with a publisher-provided checksum.
 - Long-running write and hashing work executes off the GUI thread.
+- Windows and Linux GUI executables are built in CI from a pinned PyInstaller toolchain.
+- Every packaged executable must pass a frozen-binary self-test before it becomes an artifact.
+- Release-candidate artifacts include a SHA-256 checksum and machine-readable manifest that explicitly reports signing state.
 - Logs are stored at `~/.boot_it/boot_it.log`.
 
 ## Supported platforms
@@ -26,7 +29,7 @@ Boot It is a desktop utility for writing bootable ISO and IMG images to removabl
 
 Boot It expects a modern Linux userspace with:
 
-- Python 3.10 or newer
+- Python 3.10 or newer when running from source
 - `lsblk`, `findmnt`, `dd`, `cmp`
 - `udisksctl` when available for normal unmounting
 - `pkexec`/PolicyKit when raw-device elevation is required
@@ -36,12 +39,12 @@ Boot It expects a modern Linux userspace with:
 Boot It expects:
 
 - Windows 10/11 with PowerShell
-- Python 3.10 or newer
+- Python 3.10 or newer when running from source
 - Administrator privileges when writing physical USB media
 
 macOS is not currently implemented and is intentionally reported as unsupported rather than silently pretending otherwise.
 
-## Installation
+## Installation from source
 
 ```bash
 git clone https://github.com/agustealo/boot_it.git
@@ -63,6 +66,25 @@ python boot-it.py
 
 On Windows, launch the terminal or packaged application with Administrator privileges before writing USB media.
 
+## Release candidates
+
+The `Package` GitHub Actions workflow builds one-file GUI executables on current GitHub-hosted Windows and Linux runners. Runtime dependencies are audited before packaging. Each frozen executable is then launched in a headless self-test mode before publication as a workflow artifact.
+
+Each artifact set contains:
+
+- `Boot-It-<version>-<platform>` or `.exe`
+- matching `.sha256` checksum
+- matching `.json` manifest with version, platform, binary size, self-test result, and signing state
+
+Release candidates are currently **unsigned** and the manifest says so explicitly. They must not be described as signed until real platform signing credentials and verification gates are configured.
+
+Source diagnostics are available without starting Qt:
+
+```bash
+python boot-it.py --version
+python boot-it.py --diagnose
+```
+
 ## Safe usage
 
 1. Download the ISO/IMG from the operating-system or software publisher.
@@ -70,7 +92,7 @@ On Windows, launch the terminal or packaged application with Administrator privi
 3. Insert the target USB drive and press **Refresh** if needed.
 4. Confirm the exact model, device identifier, capacity, and displayed hardware identity shown by Boot It.
 5. Press **Write and verify**.
-6. Boot It rediscoveries the target and refuses to continue if its physical identity or safety state changed after confirmation.
+6. Boot It rediscovers the target and refuses to continue if its physical identity or safety state changed after confirmation.
 7. Boot It dismounts the target, writes the image, flushes it, and verifies the written bytes against the source.
 
 Writing an image destroys the existing contents of the selected USB device. System disks are excluded from the writable target set, but the final device confirmation remains an important safety boundary.
@@ -88,11 +110,12 @@ python -m pip install -r requirements-dev.txt
 Run the quality checks:
 
 ```bash
-python -m compileall -q boot_it.py boot-it.py tests
+python -m compileall -q boot_it.py boot-it.py boot_it_meta.py scripts tests
 python -m pytest -q
+python -m pip_audit -r requirements.txt
 ```
 
-The GitHub Actions quality workflow runs those checks on Python 3.10, 3.12, and 3.14.
+The GitHub Actions quality workflow runs compile/tests on Python 3.10, 3.12, and 3.14. The package workflow independently audits dependencies, builds frozen applications, executes the packaged self-test, and generates checksums/manifests on Windows and Linux.
 
 ## Architecture notes
 
@@ -100,11 +123,13 @@ The project deliberately uses native disk inventory instead of parsing human-ori
 
 A device path such as `/dev/sdb` or `\\.\PhysicalDrive2` is treated as a location, not a durable identity. Boot It captures a fingerprint when the target is selected and rebuilds it from fresh OS inventory immediately before destructive work. This prevents a removed/reinserted or replacement device from inheriting an earlier safety decision merely because the operating system reused the same path.
 
+Release diagnostics intentionally live outside the Qt module so CI can prove that a frozen executable starts and contains the expected release metadata without opening the GUI or touching a disk.
+
 Boot It currently performs direct image writes. Multi-ISO operation is a different product mode and should be implemented as an explicit, separately tested feature rather than layered implicitly onto raw-image writing.
 
 ## Near-term hardening roadmap
 
-- Package signed Windows and Linux releases instead of requiring users to run from source.
+- Add real Windows code signing and Linux artifact signing with CI verification once signing credentials are provisioned.
 - Add hardware-backed integration tests using disposable virtual/removable disks.
 - Add image-format introspection and publisher-checksum retrieval where a trustworthy upstream metadata source exists.
 - Add macOS disk discovery/unmount/raw-write support only after the same target-safety and verification guarantees are implemented.
@@ -116,4 +141,4 @@ Boot It is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See
 
 ## Contributing
 
-Pull requests should preserve the safety invariants: never expose a known system disk as writable, never trust a stale target identity, never claim success before verification completes, never accept a target larger/smaller mismatch silently, and never reintroduce password capture into the application process.
+Pull requests should preserve the safety invariants: never expose a known system disk as writable, never trust a stale target identity, never claim success before verification completes, never accept a target larger/smaller mismatch silently, never misrepresent artifact signing state, and never reintroduce password capture into the application process.
