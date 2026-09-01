@@ -2,21 +2,64 @@ from pathlib import Path
 
 import pytest
 
-from boot_it import DriveInfo, format_bytes, validate_image, windows_disk_number
+import boot_it
+from boot_it import DriveInfo, format_bytes, revalidate_target, validate_image, windows_disk_number
+
+
+def make_drive(**overrides) -> DriveInfo:
+    values = {
+        "device": "/dev/sdz",
+        "size": 16 * 1024**3,
+        "model": "Test USB",
+        "bus": "usb",
+        "removable": True,
+        "safe": True,
+        "reason": "",
+        "hardware_id": "SERIAL-123",
+    }
+    values.update(overrides)
+    return DriveInfo(**values)
 
 
 def test_drive_label_marks_blocked_target() -> None:
-    drive = DriveInfo(
-        device="/dev/sdz",
-        size=16 * 1024**3,
-        model="Test USB",
-        bus="usb",
-        removable=True,
-        safe=False,
-        reason="system disk",
-    )
+    drive = make_drive(safe=False, reason="system disk")
     assert "blocked: system disk" in drive.label
     assert "/dev/sdz" in drive.label
+
+
+def test_drive_identity_includes_hardware_id() -> None:
+    first = make_drive(hardware_id="SERIAL-123")
+    replacement = make_drive(hardware_id="SERIAL-999")
+    assert first.identity != replacement.identity
+
+
+def test_revalidate_target_accepts_unchanged_safe_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = make_drive()
+    monkeypatch.setattr(boot_it, "discover_drives", lambda system: [expected])
+    assert revalidate_target(expected, "Linux") == expected
+
+
+def test_revalidate_target_rejects_removed_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = make_drive()
+    monkeypatch.setattr(boot_it, "discover_drives", lambda system: [])
+    with pytest.raises(RuntimeError, match="no longer present"):
+        revalidate_target(expected, "Linux")
+
+
+def test_revalidate_target_rejects_same_path_replacement(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = make_drive(hardware_id="SERIAL-123")
+    replacement = make_drive(hardware_id="SERIAL-999")
+    monkeypatch.setattr(boot_it, "discover_drives", lambda system: [replacement])
+    with pytest.raises(RuntimeError, match="identity changed"):
+        revalidate_target(expected, "Linux")
+
+
+def test_revalidate_target_rejects_newly_blocked_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = make_drive()
+    blocked = make_drive(safe=False, reason="read-only")
+    monkeypatch.setattr(boot_it, "discover_drives", lambda system: [blocked])
+    with pytest.raises(RuntimeError, match="no longer writable"):
+        revalidate_target(expected, "Linux")
 
 
 def test_validate_image_rejects_missing_file(tmp_path: Path) -> None:

@@ -8,8 +8,10 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +32,10 @@ logging.basicConfig(
 LOGGER = logging.getLogger("boot_it")
 
 
+class OperationCancelled(RuntimeError):
+    """Raised when a destructive operation is cancelled intentionally."""
+
+
 @dataclass(frozen=True)
 class DriveInfo:
     device: str
@@ -39,6 +45,7 @@ class DriveInfo:
     removable: bool
     safe: bool
     reason: str = ""
+    hardware_id: str = ""
 
     @property
     def size_gib(self) -> float:
@@ -48,6 +55,16 @@ class DriveInfo:
     def label(self) -> str:
         suffix = "" if self.safe else f" [blocked: {self.reason}]"
         return f"{self.model or 'USB drive'} · {self.size_gib:.2f} GiB · {self.device}{suffix}"
+
+    @property
+    def identity(self) -> tuple[str, int, str, str, str]:
+        return (
+            self.device,
+            self.size,
+            self.model.strip().casefold(),
+            self.bus.strip().casefold(),
+            self.hardware_id.strip().casefold(),
+        )
 
 
 def format_bytes(value: int) -> str:
@@ -117,7 +134,7 @@ def discover_linux_drives() -> list[DriveInfo]:
             "--json",
             "--bytes",
             "--output",
-            "NAME,PATH,SIZE,MODEL,TRAN,RM,TYPE,RO",
+            "NAME,PATH,SIZE,MODEL,TRAN,RM,TYPE,RO,SERIAL,WWN",
         ]
     )
     root_disk = _linux_root_disk()
@@ -138,6 +155,8 @@ def discover_linux_drives() -> list[DriveInfo]:
             reason = "read-only"
         elif not device:
             reason = "missing device path"
+        serial = str(item.get("serial") or "").strip()
+        wwn = str(item.get("wwn") or "").strip()
         drives.append(
             DriveInfo(
                 device=device,
@@ -147,6 +166,7 @@ def discover_linux_drives() -> list[DriveInfo]:
                 removable=removable,
                 safe=safe,
                 reason=reason,
+                hardware_id=wwn or serial,
             )
         )
     return drives
@@ -175,7 +195,7 @@ def _powershell_json(script: str):
 def discover_windows_drives() -> list[DriveInfo]:
     data = _powershell_json(
         "@(Get-Disk | Where-Object { $_.BusType -eq 'USB' } | "
-        "Select-Object Number,FriendlyName,Size,BusType,IsBoot,IsSystem,IsReadOnly,IsOffline) | "
+        "Select-Object Number,FriendlyName,Size,BusType,IsBoot,IsSystem,IsReadOnly,IsOffline,UniqueId,SerialNumber) | "
         "ConvertTo-Json -Compress"
     )
     if isinstance(data, dict):
@@ -190,6 +210,7 @@ def discover_windows_drives() -> list[DriveInfo]:
             blocked_reason = "read-only"
         elif item.get("IsOffline"):
             blocked_reason = "offline"
+        hardware_id = str(item.get("UniqueId") or item.get("SerialNumber") or "").strip()
         drives.append(
             DriveInfo(
                 device=rf"\\.\PhysicalDrive{number}",
@@ -199,6 +220,7 @@ def discover_windows_drives() -> list[DriveInfo]:
                 removable=True,
                 safe=not blocked_reason,
                 reason=blocked_reason,
+                hardware_id=hardware_id,
             )
         )
     return drives
@@ -213,6 +235,22 @@ def discover_drives(system: str | None = None) -> list[DriveInfo]:
     raise RuntimeError(f"Unsupported operating system: {detected}")
 
 
+def revalidate_target(expected: DriveInfo, system: str) -> DriveInfo:
+    """Rediscover and prove that the selected physical target is still the same safe device."""
+    candidates = discover_drives(system)
+    current = next((drive for drive in candidates if drive.device == expected.device), None)
+    if current is None:
+        raise RuntimeError("Target USB is no longer present. Refresh the device list and select it again.")
+    if not current.safe:
+        raise RuntimeError(f"Target is no longer writable: {current.reason or 'safety policy blocked it'}.")
+    if current.identity != expected.identity:
+        raise RuntimeError(
+            "Target identity changed after confirmation. No data was written. "
+            "Refresh the device list and confirm the physical USB again."
+        )
+    return current
+
+
 def is_windows_admin() -> bool:
     if platform.system() != "Windows":
         return False
@@ -220,6 +258,11 @@ def is_windows_admin() -> bool:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+def _check_cancel(cancel_event: threading.Event) -> None:
+    if cancel_event.is_set():
+        raise OperationCancelled("Operation cancelled. The target may contain a partial image and should not be booted.")
 
 
 def linux_unmount(device: str) -> None:
@@ -262,14 +305,97 @@ def _dd_command(image: str, device: str) -> list[str]:
     return command
 
 
-def linux_verify(image: str, device: str) -> None:
+def _terminate_process_group(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=3)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=3)
+
+
+def linux_write(
+    image: str,
+    device: str,
+    progress_callback,
+    cancel_event: threading.Event,
+) -> None:
+    command = _dd_command(image, device)
+    total = Path(image).stat().st_size
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        start_new_session=True,
+    )
+    assert process.stderr is not None
+    os.set_blocking(process.stderr.fileno(), False)
+    buffered = ""
+    try:
+        while process.poll() is None:
+            if cancel_event.is_set():
+                _terminate_process_group(process)
+                raise OperationCancelled(
+                    "Write cancelled. The USB contains a partial image and must be rewritten before use."
+                )
+            try:
+                chunk = process.stderr.read() or ""
+            except BlockingIOError:
+                chunk = ""
+            if chunk:
+                buffered += chunk
+                matches = re.findall(r"(\d+)\s+bytes", buffered)
+                if matches:
+                    progress_callback(int(matches[-1]), total)
+                buffered = buffered[-256:]
+            time.sleep(0.1)
+        remainder = process.stderr.read() or ""
+        matches = re.findall(r"(\d+)\s+bytes", buffered + remainder)
+        if matches:
+            progress_callback(int(matches[-1]), total)
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command)
+    finally:
+        if process.poll() is None:
+            _terminate_process_group(process)
+
+
+def linux_verify(image: str, device: str, cancel_event: threading.Event) -> None:
     size = Path(image).stat().st_size
     command = ["cmp", "-n", str(size), image, device]
     if os.geteuid() != 0:
         if not shutil.which("pkexec"):
             raise RuntimeError("pkexec is required for post-write verification.")
         command.insert(0, "pkexec")
-    subprocess.run(command, check=True)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        while process.poll() is None:
+            if cancel_event.is_set():
+                _terminate_process_group(process)
+                raise OperationCancelled(
+                    "Verification cancelled. Boot It cannot certify the USB; rewrite or verify it before use."
+                )
+            time.sleep(0.1)
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command)
+    finally:
+        if process.poll() is None:
+            _terminate_process_group(process)
 
 
 def windows_disk_number(device: str) -> int:
@@ -289,13 +415,19 @@ def windows_dismount(device: str) -> None:
     )
 
 
-def windows_write(image: str, device: str, progress_callback) -> None:
+def windows_write(
+    image: str,
+    device: str,
+    progress_callback,
+    cancel_event: threading.Event,
+) -> None:
     if not is_windows_admin():
         raise PermissionError("Run Boot It as Administrator to write a raw USB device on Windows.")
     total = Path(image).stat().st_size
     written = 0
     with open(image, "rb") as source, open(device, "r+b", buffering=0) as target:
         while True:
+            _check_cancel(cancel_event)
             chunk = source.read(CHUNK_SIZE)
             if not chunk:
                 break
@@ -306,11 +438,17 @@ def windows_write(image: str, device: str, progress_callback) -> None:
         os.fsync(target.fileno())
 
 
-def windows_verify(image: str, device: str, progress_callback) -> None:
+def windows_verify(
+    image: str,
+    device: str,
+    progress_callback,
+    cancel_event: threading.Event,
+) -> None:
     total = Path(image).stat().st_size
     compared = 0
     with open(image, "rb") as source, open(device, "rb", buffering=0) as target:
         while True:
+            _check_cancel(cancel_event)
             expected = source.read(CHUNK_SIZE)
             if not expected:
                 break
@@ -324,13 +462,17 @@ def windows_verify(image: str, device: str, progress_callback) -> None:
 class WriteWorker(QtCore.QThread):
     status = QtCore.Signal(str)
     progress = QtCore.Signal(int)
-    completed = QtCore.Signal(bool, str)
+    completed = QtCore.Signal(bool, bool, str)
 
     def __init__(self, image: str, drive: DriveInfo, system: str):
         super().__init__()
         self.image = image
         self.drive = drive
         self.system = system
+        self._cancel_event = threading.Event()
+
+    def request_cancel(self) -> None:
+        self._cancel_event.set()
 
     def _emit_progress(self, done: int, total: int) -> None:
         if total:
@@ -339,47 +481,37 @@ class WriteWorker(QtCore.QThread):
     def run(self) -> None:
         started = time.monotonic()
         try:
+            self.status.emit("Revalidating target identity…")
+            drive = revalidate_target(self.drive, self.system)
+            _check_cancel(self._cancel_event)
             if self.system == "Linux":
                 self.status.emit("Unmounting target volumes…")
-                linux_unmount(self.drive.device)
+                linux_unmount(drive.device)
+                _check_cancel(self._cancel_event)
                 self.status.emit("Writing image…")
-                command = _dd_command(self.image, self.drive.device)
-                total = Path(self.image).stat().st_size
-                process = subprocess.Popen(
-                    command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    bufsize=1,
-                )
-                assert process.stderr is not None
-                for chunk in iter(lambda: process.stderr.read(256), ""):
-                    matches = re.findall(r"(\d+)\s+bytes", chunk)
-                    if matches:
-                        self._emit_progress(int(matches[-1]), total)
-                return_code = process.wait()
-                if return_code:
-                    raise subprocess.CalledProcessError(return_code, command)
+                linux_write(self.image, drive.device, self._emit_progress, self._cancel_event)
                 self.status.emit("Verifying written bytes…")
-                linux_verify(self.image, self.drive.device)
+                linux_verify(self.image, drive.device, self._cancel_event)
                 self.progress.emit(100)
             elif self.system == "Windows":
                 self.status.emit("Dismounting target volumes…")
-                windows_dismount(self.drive.device)
+                windows_dismount(drive.device)
+                _check_cancel(self._cancel_event)
                 self.status.emit("Writing image…")
-                windows_write(self.image, self.drive.device, self._emit_progress)
+                windows_write(self.image, drive.device, self._emit_progress, self._cancel_event)
                 self.status.emit("Verifying written bytes…")
-                windows_verify(self.image, self.drive.device, self._emit_progress)
+                windows_verify(self.image, drive.device, self._emit_progress, self._cancel_event)
                 self.progress.emit(100)
             else:
                 raise RuntimeError(f"Unsupported operating system: {self.system}")
             elapsed = time.monotonic() - started
-            self.completed.emit(True, f"Write and verification completed in {elapsed:.1f} seconds.")
+            self.completed.emit(True, False, f"Write and verification completed in {elapsed:.1f} seconds.")
+        except OperationCancelled as exc:
+            LOGGER.warning("Bootable media operation cancelled: %s", exc)
+            self.completed.emit(False, True, str(exc))
         except Exception as exc:
             LOGGER.exception("Bootable media creation failed")
-            self.completed.emit(False, str(exc))
+            self.completed.emit(False, False, str(exc))
 
 
 class HashWorker(QtCore.QThread):
@@ -410,7 +542,7 @@ class BootItWindow(QtWidgets.QWidget):
 
     def _build_ui(self) -> None:
         self.setWindowTitle(f"{APP_NAME} · verified boot media")
-        self.resize(760, 560)
+        self.resize(760, 590)
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(14)
@@ -445,9 +577,9 @@ class BootItWindow(QtWidgets.QWidget):
         drive_layout = QtWidgets.QHBoxLayout(drive_group)
         self.drive_combo = QtWidgets.QComboBox()
         drive_layout.addWidget(self.drive_combo, 1)
-        refresh = QtWidgets.QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh_drives)
-        drive_layout.addWidget(refresh)
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.refresh_drives)
+        drive_layout.addWidget(self.refresh_button)
         root.addWidget(drive_group)
 
         self.warning = QtWidgets.QLabel("The selected target will be overwritten. System disks are blocked.")
@@ -462,12 +594,18 @@ class BootItWindow(QtWidgets.QWidget):
         self.status.setMaximumBlockCount(500)
         root.addWidget(self.status, 1)
 
+        actions = QtWidgets.QHBoxLayout()
         self.write_button = QtWidgets.QPushButton("Write and verify")
         button_font = self.write_button.font()
         button_font.setBold(True)
         self.write_button.setFont(button_font)
         self.write_button.clicked.connect(self.start_write)
-        root.addWidget(self.write_button)
+        actions.addWidget(self.write_button, 1)
+        self.cancel_button = QtWidgets.QPushButton("Cancel")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_write)
+        actions.addWidget(self.cancel_button)
+        root.addLayout(actions)
 
     def browse_image(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -495,6 +633,8 @@ class BootItWindow(QtWidgets.QWidget):
         self.hash_label.setText(f"SHA-256: {digest or 'unavailable'}")
 
     def refresh_drives(self) -> None:
+        if self.worker and self.worker.isRunning():
+            return
         self.drive_combo.clear()
         self.drives = []
         try:
@@ -544,11 +684,13 @@ class BootItWindow(QtWidgets.QWidget):
                 "Boot It needs Administrator privileges on Windows before it can open a physical USB device.",
             )
             return
+        identity_note = drive.hardware_id or "hardware ID unavailable; model/capacity/path fingerprint will be rechecked"
         confirmation = QtWidgets.QMessageBox.warning(
             self,
             "Confirm destructive write",
-            f"Erase and overwrite:\n\n{drive.model}\n{drive.device}\n{drive.size_gib:.2f} GiB\n\n"
-            "The image will be verified byte-for-byte after writing.",
+            f"Erase and overwrite:\n\n{drive.model}\n{drive.device}\n{drive.size_gib:.2f} GiB\n"
+            f"Identity: {identity_note}\n\n"
+            "Boot It will rediscover this exact target immediately before writing and verify every written byte.",
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
             QtWidgets.QMessageBox.StandardButton.Cancel,
         )
@@ -556,6 +698,10 @@ class BootItWindow(QtWidgets.QWidget):
             return
         self.progress.setValue(0)
         self.write_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.refresh_button.setEnabled(False)
+        self.drive_combo.setEnabled(False)
+        self.image_edit.setEnabled(False)
         self._log(f"Starting write: {Path(image).name} → {drive.device}")
         self.worker = WriteWorker(image, drive, self.system)
         self.worker.status.connect(self._log)
@@ -563,19 +709,46 @@ class BootItWindow(QtWidgets.QWidget):
         self.worker.completed.connect(self._write_finished)
         self.worker.start()
 
-    @QtCore.Slot(bool, str)
-    def _write_finished(self, success: bool, message: str) -> None:
+    def cancel_write(self) -> None:
+        if not self.worker or not self.worker.isRunning():
+            return
+        self.cancel_button.setEnabled(False)
+        self._log("Cancellation requested. Stopping at the next safe interruption point…")
+        self.worker.request_cancel()
+
+    @QtCore.Slot(bool, bool, str)
+    def _write_finished(self, success: bool, cancelled: bool, message: str) -> None:
         self.write_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        self.refresh_button.setEnabled(True)
+        self.drive_combo.setEnabled(True)
+        self.image_edit.setEnabled(True)
         self._log(message)
         if success:
             QtWidgets.QMessageBox.information(self, APP_NAME, message)
+        elif cancelled:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, message)
         else:
             QtWidgets.QMessageBox.critical(self, APP_NAME, f"Write failed:\n{message}\n\nLog: {LOG_PATH}")
+        self.worker = None
         self.refresh_drives()
 
     @QtCore.Slot(str)
     def _log(self, message: str) -> None:
         self.status.appendPlainText(message)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self.worker and self.worker.isRunning():
+            answer = QtWidgets.QMessageBox.warning(
+                self,
+                "Write in progress",
+                "A USB operation is still running. Cancel it before closing Boot It.",
+                QtWidgets.QMessageBox.StandardButton.Ok,
+            )
+            del answer
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
