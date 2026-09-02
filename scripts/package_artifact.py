@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -51,6 +52,16 @@ def smoke_binary(binary: Path) -> dict[str, object]:
     return payload
 
 
+def build_provenance() -> dict[str, str | None]:
+    return {
+        "source_sha": os.environ.get("GITHUB_SHA") or None,
+        "source_ref": os.environ.get("GITHUB_REF") or None,
+        "workflow_run_id": os.environ.get("GITHUB_RUN_ID") or None,
+        "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT") or None,
+        "repository": os.environ.get("GITHUB_REPOSITORY") or None,
+    }
+
+
 def package(binary: Path, output_dir: Path) -> tuple[Path, Path, Path]:
     if not binary.is_file():
         raise FileNotFoundError(binary)
@@ -75,6 +86,8 @@ def package(binary: Path, output_dir: Path) -> tuple[Path, Path, Path]:
         "self_test": payload,
         "signed": False,
         "signature_status": "unsigned release candidate",
+        "github_attestation_expected": bool(os.environ.get("GITHUB_ACTIONS")),
+        **build_provenance(),
     }
     manifest.write_text(json.dumps(manifest_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return artifact, checksum, manifest
