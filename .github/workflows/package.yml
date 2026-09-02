@@ -36,9 +36,12 @@ jobs:
         run: >-
           pyinstaller --clean --noconfirm --onefile --windowed --name Boot-It
           --hidden-import boot_it_runtime
+          --hidden-import boot_it_auth_runtime
           --hidden-import boot_it_image
           --hidden-import boot_it_provenance
           --hidden-import boot_it_openpgp
+          --hidden-import boot_it_publishers
+          --hidden-import boot_it_publisher_runtime
           boot-it.py
       - name: Smoke, checksum, and manifest
         shell: bash

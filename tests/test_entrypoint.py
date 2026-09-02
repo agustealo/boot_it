@@ -61,6 +61,9 @@ def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
         assert boot_it.BootItWindow._build_ui is not original_build_ui
         assert boot_it.BootItWindow._hash_ready is not original_hash_ready
         assert boot_it.BootItWindow.start_write is not original_start_write
+        assert hasattr(boot_it.BootItWindow, "_boot_it_authenticate")
+        assert hasattr(boot_it.BootItWindow, "_boot_it_apply_publisher_profile")
+        assert hasattr(boot_it.BootItWindow, "_boot_it_selected_publisher_profile")
     finally:
         boot_it.linux_write = original_linux_write
         boot_it.validate_image = original_validate_image
