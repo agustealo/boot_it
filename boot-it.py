@@ -24,10 +24,12 @@ def load_application_main() -> Callable[[Sequence[str] | None], int]:
     from boot_it_auth_runtime import install_openpgp_authenticity
     from boot_it_publisher_runtime import install_publisher_profiles
     from boot_it_runtime import install_runtime_patches
+    from boot_it_source_runtime import install_source_seal
 
     install_runtime_patches(core)
     install_openpgp_authenticity(core)
     install_publisher_profiles(core)
+    install_source_seal(core)
     return core.main
 
 
