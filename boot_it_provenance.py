@@ -72,9 +72,6 @@ def parse_sha256_manifest(text: str) -> list[ChecksumEntry]:
         match = COREUTILS_RE.match(line)
         if match:
             digest, _mode, filename = match.groups()
-            # GNU coreutils prefixes escaped filenames with a backslash before
-            # the digest line. Correctly decoding every escape is subtle, so
-            # reject that syntax rather than bind a checksum to the wrong file.
             if raw_line.startswith("\\"):
                 continue
             entries.append(
@@ -92,6 +89,17 @@ def parse_sha256_manifest(text: str) -> list[ChecksumEntry]:
     return entries
 
 
+def _validated_entries_from_text(text: str) -> list[ChecksumEntry]:
+    if not text:
+        raise ValueError("Checksum manifest is empty.")
+    if len(text.encode("utf-8")) > MAX_MANIFEST_SIZE:
+        raise ValueError("Checksum manifest is unexpectedly large.")
+    entries = parse_sha256_manifest(text)
+    if not entries:
+        raise ValueError("No SHA-256 entries were found in the selected manifest.")
+    return entries
+
+
 def read_sha256_manifest(path: str | Path) -> list[ChecksumEntry]:
     manifest = Path(path)
     if not manifest.is_file():
@@ -102,10 +110,7 @@ def read_sha256_manifest(path: str | Path) -> list[ChecksumEntry]:
     if size > MAX_MANIFEST_SIZE:
         raise ValueError("Checksum manifest is unexpectedly large.")
     text = manifest.read_text(encoding="utf-8", errors="strict")
-    entries = parse_sha256_manifest(text)
-    if not entries:
-        raise ValueError("No SHA-256 entries were found in the selected manifest.")
-    return entries
+    return _validated_entries_from_text(text)
 
 
 def _candidate_entries(image: Path, entries: list[ChecksumEntry]) -> list[ChecksumEntry]:
@@ -120,8 +125,6 @@ def _candidate_entries(image: Path, entries: list[ChecksumEntry]) -> list[Checks
         if entry.filename is not None and PurePosixPath(entry.filename).name == image_name
     ]
     if basename_matches:
-        # A manifest containing two different paths with the same basename is
-        # intentionally ambiguous. The caller will reject conflicting hashes.
         return basename_matches
 
     bare = [entry for entry in entries if entry.filename is None]
@@ -130,18 +133,17 @@ def _candidate_entries(image: Path, entries: list[ChecksumEntry]) -> list[Checks
     return []
 
 
-def verify_sha256_manifest(
-    image_path: str | Path,
-    manifest_path: str | Path,
+def _verify_entries(
+    image: Path,
+    entries: list[ChecksumEntry],
     *,
-    actual_digest: str | None = None,
+    manifest_label: str,
+    actual_digest: str | None,
+    authenticity: str,
 ) -> ProvenanceResult:
-    image = Path(image_path)
-    manifest = Path(manifest_path)
     if not image.is_file():
         raise FileNotFoundError(image)
 
-    entries = read_sha256_manifest(manifest)
     candidates = _candidate_entries(image, entries)
     actual = (actual_digest or sha256_file(image)).lower()
     if not SHA256_RE.fullmatch(actual):
@@ -150,9 +152,10 @@ def verify_sha256_manifest(
     if not candidates:
         return ProvenanceResult(
             status="not_listed",
-            manifest=str(manifest),
+            manifest=manifest_label,
             image=str(image),
             actual_digest=actual,
+            authenticity=authenticity,
             message="The selected image filename is not listed in this checksum manifest.",
         )
 
@@ -160,9 +163,10 @@ def verify_sha256_manifest(
     if len(expected_values) != 1:
         return ProvenanceResult(
             status="ambiguous",
-            manifest=str(manifest),
+            manifest=manifest_label,
             image=str(image),
             actual_digest=actual,
+            authenticity=authenticity,
             message="The checksum manifest contains conflicting SHA-256 values for this image filename.",
         )
 
@@ -170,25 +174,64 @@ def verify_sha256_manifest(
     matched_names = sorted({entry.filename or "<single bare digest>" for entry in candidates})
     matched = ", ".join(matched_names)
     if actual == expected:
+        authenticity_message = (
+            "Manifest authenticity is verified by the pinned OpenPGP fingerprint."
+            if authenticity == "openpgp_verified"
+            else "Manifest authenticity has not been independently verified."
+        )
         return ProvenanceResult(
             status="verified",
-            manifest=str(manifest),
+            manifest=manifest_label,
             image=str(image),
             actual_digest=actual,
             expected_digest=expected,
             matched_filename=matched,
-            message=(
-                "Image SHA-256 matches the selected manifest. "
-                "Manifest authenticity has not been independently verified."
-            ),
+            authenticity=authenticity,
+            message=f"Image SHA-256 matches the selected manifest. {authenticity_message}",
         )
 
     return ProvenanceResult(
         status="mismatch",
-        manifest=str(manifest),
+        manifest=manifest_label,
         image=str(image),
         actual_digest=actual,
         expected_digest=expected,
         matched_filename=matched,
+        authenticity=authenticity,
         message="Image SHA-256 does not match the selected checksum manifest.",
+    )
+
+
+def verify_sha256_manifest_text(
+    image_path: str | Path,
+    manifest_text: str,
+    *,
+    manifest_label: str = "<authenticated manifest>",
+    actual_digest: str | None = None,
+    authenticity: str = "unverified_manifest",
+) -> ProvenanceResult:
+    entries = _validated_entries_from_text(manifest_text)
+    return _verify_entries(
+        Path(image_path),
+        entries,
+        manifest_label=manifest_label,
+        actual_digest=actual_digest,
+        authenticity=authenticity,
+    )
+
+
+def verify_sha256_manifest(
+    image_path: str | Path,
+    manifest_path: str | Path,
+    *,
+    actual_digest: str | None = None,
+) -> ProvenanceResult:
+    manifest = Path(manifest_path)
+    entries = read_sha256_manifest(manifest)
+    return _verify_entries(
+        Path(image_path),
+        entries,
+        manifest_label=str(manifest),
+        actual_digest=actual_digest,
+        authenticity="unverified_manifest",
     )

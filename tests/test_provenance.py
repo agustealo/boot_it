@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from boot_it_provenance import parse_sha256_manifest, verify_sha256_manifest
+from boot_it_provenance import (
+    parse_sha256_manifest,
+    verify_sha256_manifest,
+    verify_sha256_manifest_text,
+)
 
 
 def _image(tmp_path: Path, name: str = "system.iso") -> tuple[Path, str]:
@@ -25,6 +29,37 @@ def test_coreutils_sha256sums_matches_exact_filename(tmp_path: Path) -> None:
     assert result.expected_digest == digest
     assert result.authenticity == "unverified_manifest"
     assert "not been independently verified" in result.message
+
+
+def test_authenticated_manifest_text_preserves_verified_authenticity(tmp_path: Path) -> None:
+    image, digest = _image(tmp_path)
+    manifest_text = f"{digest}  {image.name}\n"
+
+    result = verify_sha256_manifest_text(
+        image,
+        manifest_text,
+        manifest_label="signed SHA256SUMS",
+        actual_digest=digest,
+        authenticity="openpgp_verified",
+    )
+    assert result.is_match
+    assert result.authenticity == "openpgp_verified"
+    assert result.manifest == "signed SHA256SUMS"
+    assert "pinned OpenPGP fingerprint" in result.message
+
+
+def test_authenticated_manifest_text_still_rejects_checksum_mismatch(tmp_path: Path) -> None:
+    image, digest = _image(tmp_path)
+    manifest_text = f"{'f' * 64}  {image.name}\n"
+
+    result = verify_sha256_manifest_text(
+        image,
+        manifest_text,
+        actual_digest=digest,
+        authenticity="openpgp_verified",
+    )
+    assert result.status == "mismatch"
+    assert result.authenticity == "openpgp_verified"
 
 
 def test_binary_marker_coreutils_format_is_supported(tmp_path: Path) -> None:
