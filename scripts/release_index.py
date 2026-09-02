@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+INDEX_NAME = "release-index.json"
+INDEX_CHECKSUM_NAME = f"{INDEX_NAME}.sha256"
 
 
 def sha256_file(path: Path) -> str:
@@ -69,14 +71,21 @@ def build_release_index(
     _validate_contract(contract, version, tag, source_sha)
 
     files = sorted(
-        path for path in bundle_dir.iterdir()
-        if path.is_file() and path.name != "release-index.json"
+        path
+        for path in bundle_dir.iterdir()
+        if path.is_file() and path.name not in {INDEX_NAME, INDEX_CHECKSUM_NAME}
     )
     names = [path.name for path in files]
     if len(names) != len(set(names)):
         raise ValueError("Release bundle contains duplicate filenames.")
 
-    manifests = [path for path in files if path.name.startswith("Boot-It-") and path.suffix == ".json" and not path.name.endswith(".spdx.json")]
+    manifests = [
+        path
+        for path in files
+        if path.name.startswith("Boot-It-")
+        and path.suffix == ".json"
+        and not path.name.endswith(".spdx.json")
+    ]
     sboms = [path for path in files if path.name.endswith(".spdx.json")]
     checksums = [path for path in files if path.name.endswith(".sha256")]
     if len(manifests) < 2:
@@ -114,6 +123,7 @@ def build_release_index(
         "files": entries,
         "verification": {
             "checksums": "Verify SHA256SUMS and individual .sha256 sidecars before execution.",
+            "release_index": f"Verify {INDEX_CHECKSUM_NAME}, then require every published payload file to match this index exactly.",
             "attestations": "Verify GitHub artifact attestations for each executable and its SPDX SBOM.",
             "windows_authenticode": "When signed, verify the Windows executable Authenticode signature and timestamp independently.",
         },
@@ -124,14 +134,93 @@ def write_release_index(payload: dict[str, object], output: Path) -> None:
     output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_index_checksum(index_path: Path, checksum_path: Path) -> None:
+    checksum_path.write_text(
+        f"{sha256_file(index_path)}  {index_path.name}\n",
+        encoding="utf-8",
+    )
+
+
+def verify_release_payload(bundle_dir: Path, *, index_name: str = INDEX_NAME) -> None:
+    index_path = bundle_dir / index_name
+    checksum_path = bundle_dir / f"{index_name}.sha256"
+    if not index_path.is_file():
+        raise ValueError(f"{index_name} is missing from the release payload.")
+    if not checksum_path.is_file():
+        raise ValueError(f"{checksum_path.name} is missing from the release payload.")
+
+    expected_index_digest, referenced_name = _parse_checksum(checksum_path)
+    if referenced_name != index_path.name:
+        raise ValueError(f"{checksum_path.name} must reference {index_path.name!r}.")
+    actual_index_digest = sha256_file(index_path)
+    if actual_index_digest != expected_index_digest:
+        raise ValueError("Release index checksum mismatch.")
+
+    index = _load_json(index_path)
+    if index.get("schema") != "boot-it-release-index-v1":
+        raise ValueError("Unsupported release index schema.")
+    entries = index.get("files")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("Release index must contain a non-empty files list.")
+
+    expected_names: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Release index file entry must be a JSON object.")
+        name = entry.get("name")
+        digest = entry.get("sha256")
+        size = entry.get("size")
+        if not isinstance(name, str) or not name or Path(name).name != name:
+            raise ValueError("Release index contains an invalid local filename.")
+        if name in {index_path.name, checksum_path.name}:
+            raise ValueError("Release index must not recursively include itself or its detached checksum.")
+        if name in expected_names:
+            raise ValueError(f"Release index contains duplicate filename {name!r}.")
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise ValueError(f"Release index has invalid SHA-256 for {name!r}.")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ValueError(f"Release index has invalid size for {name!r}.")
+
+        target = bundle_dir / name
+        if not target.is_file():
+            raise ValueError(f"Release index references missing file {name!r}.")
+        if target.stat().st_size != size:
+            raise ValueError(f"Release index size mismatch for {name!r}.")
+        if sha256_file(target) != digest.lower():
+            raise ValueError(f"Release index checksum mismatch for {name!r}.")
+        expected_names.add(name)
+
+    actual_names = {
+        path.name
+        for path in bundle_dir.iterdir()
+        if path.is_file()
+    }
+    required_names = expected_names | {index_path.name, checksum_path.name}
+    missing = sorted(required_names - actual_names)
+    extra = sorted(actual_names - required_names)
+    if missing:
+        raise ValueError("Release payload is missing indexed files: " + ", ".join(missing))
+    if extra:
+        raise ValueError("Release payload contains unindexed extra files: " + ", ".join(extra))
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build the machine-readable Boot It release index.")
+    parser = argparse.ArgumentParser(description="Build or verify the machine-readable Boot It release index.")
     parser.add_argument("--bundle-dir", required=True, type=Path)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--tag", required=True)
-    parser.add_argument("--source-sha", required=True)
-    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--version")
+    parser.add_argument("--tag")
+    parser.add_argument("--source-sha")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
+
+    if args.verify:
+        verify_release_payload(args.bundle_dir)
+        print("release payload verified")
+        return 0
+
+    if not all((args.version, args.tag, args.source_sha, args.output)):
+        parser.error("--version, --tag, --source-sha, and --output are required when building an index")
     payload = build_release_index(
         args.bundle_dir,
         version=args.version,
@@ -139,6 +228,7 @@ def main() -> int:
         source_sha=args.source_sha,
     )
     write_release_index(payload, args.output)
+    write_index_checksum(args.output, args.bundle_dir / INDEX_CHECKSUM_NAME)
     print(args.output)
     return 0
 
