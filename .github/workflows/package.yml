@@ -42,6 +42,8 @@ jobs:
           --hidden-import boot_it_openpgp
           --hidden-import boot_it_publishers
           --hidden-import boot_it_publisher_runtime
+          --hidden-import boot_it_source
+          --hidden-import boot_it_source_runtime
           boot-it.py
       - name: Smoke, checksum, and manifest
         shell: bash

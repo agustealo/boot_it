@@ -29,6 +29,6 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && python -m pip install -r requirements-dev.txt
       - name: Compile
-        run: python -m compileall -q boot_it.py boot-it.py boot_it_meta.py boot_it_runtime.py boot_it_auth_runtime.py boot_it_image.py boot_it_provenance.py boot_it_openpgp.py boot_it_publishers.py boot_it_publisher_runtime.py scripts tests
+        run: python -m compileall -q boot_it.py boot-it.py boot_it_meta.py boot_it_runtime.py boot_it_auth_runtime.py boot_it_image.py boot_it_provenance.py boot_it_openpgp.py boot_it_publishers.py boot_it_publisher_runtime.py boot_it_source.py boot_it_source_runtime.py scripts tests
       - name: Test
         run: python -m pytest -q
