@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO, Callable
 
 CHUNK_SIZE = 4 * 1024 * 1024
 
@@ -21,6 +23,21 @@ class SourceSeal:
     path: str
     sha256: str
     identity: SourceIdentity
+
+
+@dataclass
+class SourceSnapshot:
+    """Anonymous private copy of the exact bytes authorized for destructive use."""
+
+    handle: BinaryIO
+    sha256: str
+    size: int
+
+    def rewind(self) -> None:
+        self.handle.seek(0)
+
+    def close(self) -> None:
+        self.handle.close()
 
 
 def _identity_from_stat(stat: os.stat_result) -> SourceIdentity:
@@ -60,3 +77,57 @@ def verify_source_seal(
             "Source image file identity changed after verification even though its digest matched. Re-select and verify it."
         )
     return seal
+
+
+def snapshot_verified_source(
+    path: str,
+    expected_sha256: str,
+    expected_identity: SourceIdentity | None = None,
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> SourceSnapshot:
+    """Copy approved bytes into an anonymous private file before target mutation.
+
+    The returned handle, not the original pathname, becomes the authoritative byte
+    stream for both write and post-write verification. The snapshot is removed
+    automatically when closed. ``cancel_check`` may raise to abort long copies.
+    """
+
+    source = Path(path)
+    expected = expected_sha256.strip().casefold()
+    if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+        raise ValueError("Expected source SHA-256 must be a full 64-hex digest.")
+
+    snapshot = tempfile.TemporaryFile(mode="w+b")
+    digest = hashlib.sha256()
+    try:
+        with source.open("rb") as source_handle:
+            before = _identity_from_stat(os.fstat(source_handle.fileno()))
+            if expected_identity is not None and before != expected_identity:
+                raise RuntimeError("Source image file identity changed before snapshot creation.")
+            while chunk := source_handle.read(CHUNK_SIZE):
+                if cancel_check is not None:
+                    cancel_check()
+                snapshot.write(chunk)
+                digest.update(chunk)
+            after = _identity_from_stat(os.fstat(source_handle.fileno()))
+
+        if cancel_check is not None:
+            cancel_check()
+        if before != after:
+            raise RuntimeError("Source image changed while Boot It was sealing the write snapshot.")
+        actual = digest.hexdigest()
+        if actual.casefold() != expected:
+            raise RuntimeError(
+                "Source image bytes changed after approval. No target was modified."
+            )
+        snapshot.flush()
+        os.fsync(snapshot.fileno())
+        size = snapshot.tell()
+        if size != after.size:
+            raise RuntimeError("Sealed snapshot size does not match the approved source size.")
+        snapshot.seek(0)
+        return SourceSnapshot(handle=snapshot, sha256=actual, size=size)
+    except Exception:
+        snapshot.close()
+        raise

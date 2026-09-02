@@ -49,6 +49,7 @@ def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
     original_linux_verify = boot_it.linux_verify
     original_windows_write = boot_it.windows_write
     original_windows_verify = boot_it.windows_verify
+    original_worker_run = boot_it.WriteWorker.run
     original_validate_image = boot_it.validate_image
     original_build_ui = boot_it.BootItWindow._build_ui
     original_hash_ready = boot_it.BootItWindow._hash_ready
@@ -62,6 +63,8 @@ def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
         assert boot_it.linux_verify is not original_linux_verify
         assert boot_it.windows_write is not original_windows_write
         assert boot_it.windows_verify is not original_windows_verify
+        assert boot_it.WriteWorker.run is not original_worker_run
+        assert boot_it.WriteWorker.run.__module__ == "boot_it_source_runtime"
         assert boot_it.validate_image is not original_validate_image
         assert boot_it.validate_image.__module__ == "boot_it_runtime"
         assert boot_it.BootItWindow._build_ui is not original_build_ui
@@ -76,6 +79,7 @@ def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
         boot_it.linux_verify = original_linux_verify
         boot_it.windows_write = original_windows_write
         boot_it.windows_verify = original_windows_verify
+        boot_it.WriteWorker.run = original_worker_run
         boot_it.validate_image = original_validate_image
         boot_it.BootItWindow._build_ui = original_build_ui
         boot_it.BootItWindow._hash_ready = original_hash_ready
