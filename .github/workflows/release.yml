@@ -88,12 +88,28 @@ jobs:
           --hidden-import boot_it_publishers
           --hidden-import boot_it_publisher_runtime
           boot-it.py
+      - name: Sign and verify Windows Authenticode when configured
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_PFX_B64: ${{ secrets.WINDOWS_CODESIGN_PFX_B64 }}
+          WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+          WINDOWS_CODESIGN_THUMBPRINT: ${{ vars.WINDOWS_CODESIGN_THUMBPRINT }}
+          WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
+        run: |
+          python scripts/windows_authenticode.py --binary dist/Boot-It.exe --report signing-report.json
+          if (-not (Test-Path signing-report.json)) { throw "Signing report was not produced." }
+          $report = Get-Content signing-report.json -Raw | ConvertFrom-Json
+          if ($env:WINDOWS_CODESIGN_PFX_B64 -or $env:WINDOWS_CODESIGN_PASSWORD -or $env:WINDOWS_CODESIGN_THUMBPRINT -or $env:WINDOWS_CODESIGN_TIMESTAMP_URL) {
+            if (-not $report.signed) { throw "Authenticode inputs were configured but the binary was not signed." }
+            if (-not $report.timestamped) { throw "Authenticode signature is missing a verified timestamp." }
+          }
       - name: Smoke, checksum, and manifest
         id: package
         shell: bash
         run: |
           if [ "${RUNNER_OS}" = "Windows" ]; then
-            python scripts/package_artifact.py --binary dist/Boot-It.exe --output-dir release-artifacts
+            python scripts/package_artifact.py --binary dist/Boot-It.exe --output-dir release-artifacts --signing-report signing-report.json
             binary="$(find release-artifacts -maxdepth 1 -type f -name 'Boot-It-*.exe' | head -n 1)"
           else
             python scripts/package_artifact.py --binary dist/Boot-It --output-dir release-artifacts
