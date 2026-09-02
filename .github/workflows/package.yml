@@ -33,7 +33,13 @@ jobs:
       - name: Audit runtime dependencies
         run: python -m pip_audit -r requirements.txt
       - name: Build GUI executable
-        run: pyinstaller --clean --noconfirm --onefile --windowed --name Boot-It boot-it.py
+        run: >-
+          pyinstaller --clean --noconfirm --onefile --windowed --name Boot-It
+          --hidden-import boot_it_runtime
+          --hidden-import boot_it_image
+          --hidden-import boot_it_provenance
+          --hidden-import boot_it_openpgp
+          boot-it.py
       - name: Smoke, checksum, and manifest
         shell: bash
         run: |
