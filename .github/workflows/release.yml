@@ -27,8 +27,8 @@ jobs:
     outputs:
       tag: ${{ steps.contract.outputs.tag }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Validate version, source ref, and commit identity
@@ -44,7 +44,7 @@ jobs:
           fi
           python scripts/release_contract.py "${args[@]}"
           echo "tag=v${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: boot-it-release-contract
           path: release-contract.json
@@ -65,8 +65,8 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -87,6 +87,10 @@ jobs:
           --hidden-import boot_it_openpgp
           --hidden-import boot_it_publishers
           --hidden-import boot_it_publisher_runtime
+          --hidden-import boot_it_source
+          --hidden-import boot_it_source_runtime
+          --hidden-import boot_it_topology
+          --hidden-import boot_it_topology_runtime
           boot-it.py
       - name: Sign and verify Windows Authenticode when configured
         if: runner.os == 'Windows'
@@ -120,7 +124,7 @@ jobs:
           echo "binary=${binary}" >> "$GITHUB_OUTPUT"
           echo "sbom=${sbom}" >> "$GITHUB_OUTPUT"
       - name: Generate SPDX SBOM from frozen executable
-        uses: anchore/sbom-action@v0.24.0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           file: ${{ steps.package.outputs.binary }}
           format: spdx-json
@@ -128,15 +132,15 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Attest executable build provenance
-        uses: actions/attest@v4.2.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: ${{ steps.package.outputs.binary }}
       - name: Attest executable SBOM
-        uses: actions/attest@v4.2.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: ${{ steps.package.outputs.binary }}
           sbom-path: ${{ steps.package.outputs.sbom }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: boot-it-release-${{ runner.os }}-${{ runner.arch }}
           path: release-artifacts/
@@ -149,8 +153,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: boot-it-release-*
           path: dist
@@ -161,6 +165,18 @@ jobs:
           cd dist
           cat ./*.sha256 > SHA256SUMS
           sha256sum --check SHA256SUMS
+      - name: Build release index
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: >-
+          python scripts/release_index.py
+          --bundle-dir dist
+          --version "$RELEASE_VERSION"
+          --tag "$RELEASE_TAG"
+          --source-sha "$GITHUB_SHA"
+          --output dist/release-index.json
       - name: Create immutable release payload
         shell: bash
         env:
