@@ -101,3 +101,24 @@ def test_snapshot_rejects_short_or_malformed_digest(tmp_path: Path) -> None:
     image.write_bytes(b"A" * 8192)
     with pytest.raises(ValueError, match="full 64-hex"):
         snapshot_verified_source(str(image), "deadbeef")
+
+
+def test_snapshot_copy_can_be_cancelled_before_target_mutation(tmp_path: Path) -> None:
+    image = tmp_path / "image.img"
+    image.write_bytes(b"A" * (5 * 1024 * 1024))
+    approved = seal_source(str(image))
+    checks = 0
+
+    def cancel() -> None:
+        nonlocal checks
+        checks += 1
+        if checks >= 2:
+            raise RuntimeError("cancelled")
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        snapshot_verified_source(
+            str(image),
+            approved.sha256,
+            approved.identity,
+            cancel_check=cancel,
+        )
