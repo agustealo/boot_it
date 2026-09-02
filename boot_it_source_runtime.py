@@ -76,8 +76,11 @@ def _stream_to_process(
             chunk = snapshot.handle.read(core.CHUNK_SIZE)
             if not chunk:
                 break
-            process.stdin.write(chunk)
-            process.stdin.flush()
+            try:
+                process.stdin.write(chunk)
+                process.stdin.flush()
+            except BrokenPipeError:
+                break
             sent += len(chunk)
             if not parse_dd_progress:
                 progress_callback(sent, snapshot.size)
@@ -93,7 +96,10 @@ def _stream_to_process(
                         progress_callback(int(matches[-1]), snapshot.size)
                 buffered = buffered[-512:]
 
-        process.stdin.close()
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
         while process.poll() is None:
             if cancel_event.is_set():
                 core._terminate_process_group(process)
@@ -113,6 +119,10 @@ def _stream_to_process(
             time.sleep(0.05)
         if process.returncode:
             raise subprocess.CalledProcessError(process.returncode, command)
+        if sent != snapshot.size:
+            raise RuntimeError(
+                f"Sealed source stream ended early: sent {sent} of {snapshot.size} bytes."
+            )
         progress_callback(snapshot.size, snapshot.size)
     finally:
         if process.poll() is None:
@@ -165,7 +175,12 @@ def install_source_seal(core: ModuleType) -> None:
         self.status.emit("Sealing approved source bytes before touching target…")
         snapshot: SourceSnapshot | None = None
         try:
-            snapshot = snapshot_verified_source(self.image, digest, identity)
+            snapshot = snapshot_verified_source(
+                self.image,
+                digest,
+                identity,
+                cancel_check=lambda: core._check_cancel(self._cancel_event),
+            )
             active.session = (self.image, snapshot)
             original_worker_run(self)
         except core.OperationCancelled as exc:
@@ -225,6 +240,10 @@ def install_source_seal(core: ModuleType) -> None:
                 progress_callback(written, snapshot.size)
             target.flush()
             os.fsync(target.fileno())
+        if written != snapshot.size:
+            raise RuntimeError(
+                f"Sealed source stream ended early: wrote {written} of {snapshot.size} bytes."
+            )
 
     def windows_verify(image, device, progress_callback, cancel_event):
         snapshot = current_snapshot(image)
@@ -243,6 +262,10 @@ def install_source_seal(core: ModuleType) -> None:
                     raise IOError(f"Verification failed at byte offset {compared}.")
                 compared += len(expected)
                 progress_callback(compared, snapshot.size)
+        if compared != snapshot.size:
+            raise RuntimeError(
+                f"Sealed source verification ended early: compared {compared} of {snapshot.size} bytes."
+            )
 
     worker_type.run = worker_run
     core.linux_write = linux_write
