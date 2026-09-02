@@ -45,6 +45,7 @@ def test_canonical_launcher_diagnostics_are_machine_readable() -> None:
 
 
 def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
+    original_linux_discovery = boot_it.discover_linux_drives
     original_linux_write = boot_it.linux_write
     original_linux_verify = boot_it.linux_verify
     original_windows_write = boot_it.windows_write
@@ -58,6 +59,8 @@ def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
     application_main = module.load_application_main()
     try:
         assert application_main is boot_it.main
+        assert boot_it.discover_linux_drives is not original_linux_discovery
+        assert boot_it.discover_linux_drives.__module__ == "boot_it_topology_runtime"
         assert boot_it.linux_write is not original_linux_write
         assert boot_it.linux_write.__module__ == "boot_it_source_runtime"
         assert boot_it.linux_verify is not original_linux_verify
@@ -75,6 +78,7 @@ def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
         assert hasattr(boot_it.BootItWindow, "_boot_it_selected_publisher_profile")
         assert isinstance(boot_it._boot_it_source_seals, dict)
     finally:
+        boot_it.discover_linux_drives = original_linux_discovery
         boot_it.linux_write = original_linux_write
         boot_it.linux_verify = original_linux_verify
         boot_it.windows_write = original_windows_write
