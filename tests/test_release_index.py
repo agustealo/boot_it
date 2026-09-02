@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from scripts.release_index import build_release_index
+from scripts.release_index import (
+    INDEX_CHECKSUM_NAME,
+    INDEX_NAME,
+    build_release_index,
+    verify_release_payload,
+    write_index_checksum,
+    write_release_index,
+)
 
 
 def _sha(path: Path) -> str:
@@ -41,6 +48,17 @@ def _bundle(tmp_path: Path) -> tuple[Path, str]:
         )
     (tmp_path / "SHA256SUMS").write_text("aggregate\n", encoding="utf-8")
     return tmp_path, source_sha
+
+
+def _indexed_bundle(tmp_path: Path) -> tuple[Path, str]:
+    bundle, source_sha = _bundle(tmp_path)
+    payload = build_release_index(
+        bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha
+    )
+    index_path = bundle / INDEX_NAME
+    write_release_index(payload, index_path)
+    write_index_checksum(index_path, bundle / INDEX_CHECKSUM_NAME)
+    return bundle, source_sha
 
 
 def test_release_index_binds_contract_and_all_files(tmp_path: Path) -> None:
@@ -78,3 +96,38 @@ def test_release_index_requires_both_platform_evidence(tmp_path: Path) -> None:
             path.unlink()
     with pytest.raises(ValueError, match="platform manifests"):
         build_release_index(bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha)
+
+
+def test_release_payload_verifier_accepts_exact_indexed_set(tmp_path: Path) -> None:
+    bundle, _source_sha = _indexed_bundle(tmp_path)
+    verify_release_payload(bundle)
+
+
+def test_release_payload_verifier_rejects_mutated_index(tmp_path: Path) -> None:
+    bundle, _source_sha = _indexed_bundle(tmp_path)
+    index_path = bundle / INDEX_NAME
+    index_path.write_text(index_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    with pytest.raises(ValueError, match="index checksum mismatch"):
+        verify_release_payload(bundle)
+
+
+def test_release_payload_verifier_rejects_mutated_indexed_file(tmp_path: Path) -> None:
+    bundle, _source_sha = _indexed_bundle(tmp_path)
+    target = bundle / "Boot-It-0.2.0-linux-x86_64.json"
+    target.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        verify_release_payload(bundle)
+
+
+def test_release_payload_verifier_rejects_unindexed_extra_file(tmp_path: Path) -> None:
+    bundle, _source_sha = _indexed_bundle(tmp_path)
+    (bundle / "surprise.bin").write_bytes(b"not indexed")
+    with pytest.raises(ValueError, match="unindexed extra files"):
+        verify_release_payload(bundle)
+
+
+def test_release_payload_verifier_rejects_missing_index_checksum(tmp_path: Path) -> None:
+    bundle, _source_sha = _indexed_bundle(tmp_path)
+    (bundle / INDEX_CHECKSUM_NAME).unlink()
+    with pytest.raises(ValueError, match="missing from the release payload"):
+        verify_release_payload(bundle)
