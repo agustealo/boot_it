@@ -62,10 +62,37 @@ def build_provenance() -> dict[str, str | None]:
     }
 
 
-def package(binary: Path, output_dir: Path) -> tuple[Path, Path, Path]:
+def load_signing_report(path: Path | None) -> dict[str, object]:
+    if path is None:
+        return {
+            "signed": False,
+            "signature_status": "unsigned release candidate",
+            "signer_thumbprint": None,
+            "signer_subject": None,
+            "timestamped": False,
+            "timestamp_subject": None,
+            "timestamp_thumbprint": None,
+            "digest_algorithm": None,
+            "timestamp_digest_algorithm": None,
+        }
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload.get("signed"), bool):
+        raise ValueError("Signing report must contain boolean 'signed'.")
+    if payload["signed"]:
+        required = ("signature_status", "signer_thumbprint", "timestamped", "digest_algorithm", "timestamp_digest_algorithm")
+        missing = [name for name in required if not payload.get(name)]
+        if missing:
+            raise ValueError("Verified signing report is incomplete: " + ", ".join(missing))
+        if payload.get("timestamped") is not True:
+            raise ValueError("Verified signing report must require a timestamp.")
+    return payload
+
+
+def package(binary: Path, output_dir: Path, signing_report: Path | None = None) -> tuple[Path, Path, Path]:
     if not binary.is_file():
         raise FileNotFoundError(binary)
     payload = smoke_binary(binary)
+    signing = load_signing_report(signing_report)
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = binary.suffix
     artifact_name = f"Boot-It-{__version__}-{normalized_platform_name()}{suffix}"
@@ -84,8 +111,7 @@ def package(binary: Path, output_dir: Path) -> tuple[Path, Path, Path]:
         "version": __version__,
         "build_platform": normalized_platform_name(),
         "self_test": payload,
-        "signed": False,
-        "signature_status": "unsigned release candidate",
+        **signing,
         "github_attestation_expected": bool(os.environ.get("GITHUB_ACTIONS")),
         **build_provenance(),
     }
@@ -97,8 +123,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Smoke-test and package a Boot It binary.")
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--signing-report", type=Path)
     args = parser.parse_args()
-    artifact, checksum, manifest = package(args.binary, args.output_dir)
+    artifact, checksum, manifest = package(args.binary, args.output_dir, args.signing_report)
     print(artifact)
     print(checksum)
     print(manifest)
