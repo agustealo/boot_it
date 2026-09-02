@@ -49,13 +49,15 @@ def test_release_workflow_has_minimal_split_permissions() -> None:
     assert "name: Publish GitHub release" in text
 
 
-def test_release_workflow_verifies_checksums_and_builds_index_before_publication() -> None:
+def test_release_workflow_verifies_exact_payload_before_publication() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
-    verify_index = text.index("sha256sum --check SHA256SUMS")
-    index_index = text.index("scripts/release_index.py")
+    checksum_index = text.index("sha256sum --check SHA256SUMS")
+    build_index = text.index("Build release index and detached checksum")
+    exact_verify = text.index("Verify exact immutable release payload")
     release_index = text.index("gh release create")
-    assert verify_index < index_index < release_index
+    assert checksum_index < build_index < exact_verify < release_index
     assert "--output dist/release-index.json" in text
+    assert "scripts/release_index.py --bundle-dir dist --verify" in text
     assert "--prerelease" in text
 
 
