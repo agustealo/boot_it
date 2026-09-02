@@ -25,11 +25,13 @@ def load_application_main() -> Callable[[Sequence[str] | None], int]:
     from boot_it_publisher_runtime import install_publisher_profiles
     from boot_it_runtime import install_runtime_patches
     from boot_it_source_runtime import install_source_seal
+    from boot_it_topology_runtime import install_linux_topology
 
     install_runtime_patches(core)
     install_openpgp_authenticity(core)
     install_publisher_profiles(core)
     install_source_seal(core)
+    install_linux_topology(core)
     return core.main
 
 
