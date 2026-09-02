@@ -115,7 +115,7 @@ def test_release_payload_verifier_rejects_mutated_indexed_file(tmp_path: Path) -
     bundle, _source_sha = _indexed_bundle(tmp_path)
     target = bundle / "Boot-It-0.2.0-linux-x86_64.json"
     target.write_text("{}", encoding="utf-8")
-    with pytest.raises(ValueError, match="checksum mismatch"):
+    with pytest.raises(ValueError, match=r"Release index (?:size|checksum) mismatch"):
         verify_release_payload(bundle)
 
 
