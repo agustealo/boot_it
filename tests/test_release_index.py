@@ -9,6 +9,7 @@ import pytest
 from scripts.release_index import (
     INDEX_CHECKSUM_NAME,
     INDEX_NAME,
+    SUPPORTED_PLATFORMS,
     build_release_index,
     verify_release_payload,
     write_index_checksum,
@@ -37,17 +38,41 @@ def _bundle(tmp_path: Path) -> tuple[Path, str]:
     for platform, suffix in (("linux-x86_64", ""), ("windows-x86_64", ".exe")):
         binary = tmp_path / f"Boot-It-0.2.0-{platform}{suffix}"
         binary.write_bytes(platform.encode("utf-8"))
+        digest = _sha(binary)
         (tmp_path / f"{binary.name}.sha256").write_text(
-            f"{_sha(binary)}  {binary.name}\n", encoding="utf-8"
+            f"{digest}  {binary.name}\n", encoding="utf-8"
         )
         (tmp_path / f"{binary.name}.json").write_text(
-            json.dumps({"artifact": binary.name}), encoding="utf-8"
+            json.dumps(
+                {
+                    "artifact": binary.name,
+                    "sha256": digest,
+                    "size": binary.stat().st_size,
+                    "version": "0.2.0",
+                    "build_platform": platform,
+                    "source_sha": source_sha,
+                    "source_ref": "refs/heads/main",
+                    "github_attestation_expected": True,
+                }
+            ),
+            encoding="utf-8",
         )
         (tmp_path / f"{binary.name}.spdx.json").write_text(
             json.dumps({"spdxVersion": "SPDX-2.3"}), encoding="utf-8"
         )
     (tmp_path / "SHA256SUMS").write_text("aggregate\n", encoding="utf-8")
     return tmp_path, source_sha
+
+
+def _manifest(bundle: Path, platform: str) -> Path:
+    suffix = ".exe" if platform == "windows-x86_64" else ""
+    return bundle / f"Boot-It-0.2.0-{platform}{suffix}.json"
+
+
+def _rewrite_manifest(path: Path, **changes: object) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.update(changes)
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _indexed_bundle(tmp_path: Path) -> tuple[Path, str]:
@@ -61,13 +86,14 @@ def _indexed_bundle(tmp_path: Path) -> tuple[Path, str]:
     return bundle, source_sha
 
 
-def test_release_index_binds_contract_and_all_files(tmp_path: Path) -> None:
+def test_release_index_binds_contract_platforms_and_all_files(tmp_path: Path) -> None:
     bundle, source_sha = _bundle(tmp_path)
     payload = build_release_index(
         bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha
     )
     assert payload["schema"] == "boot-it-release-index-v1"
     assert payload["source_sha"] == source_sha
+    assert payload["platforms"] == sorted(SUPPORTED_PLATFORMS)
     names = {entry["name"] for entry in payload["files"]}
     assert "release-contract.json" in names
     assert "SHA256SUMS" in names
@@ -89,12 +115,57 @@ def test_release_index_rejects_tampered_binary(tmp_path: Path) -> None:
         build_release_index(bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha)
 
 
-def test_release_index_requires_both_platform_evidence(tmp_path: Path) -> None:
+def test_release_index_requires_exact_supported_platform_set(tmp_path: Path) -> None:
     bundle, source_sha = _bundle(tmp_path)
     for path in list(bundle.iterdir()):
         if "windows-x86_64" in path.name:
             path.unlink()
-    with pytest.raises(ValueError, match="platform manifests"):
+    with pytest.raises(ValueError, match="exactly one manifest"):
+        build_release_index(bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha)
+
+
+def test_release_index_rejects_duplicate_platform_manifest(tmp_path: Path) -> None:
+    bundle, source_sha = _bundle(tmp_path)
+    _rewrite_manifest(_manifest(bundle, "windows-x86_64"), build_platform="linux-x86_64")
+    with pytest.raises(ValueError, match="Duplicate release platform"):
+        build_release_index(bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha)
+
+
+def test_release_index_rejects_manifest_source_mismatch(tmp_path: Path) -> None:
+    bundle, source_sha = _bundle(tmp_path)
+    _rewrite_manifest(_manifest(bundle, "linux-x86_64"), source_sha="b" * 40)
+    with pytest.raises(ValueError, match="source SHA mismatch"):
+        build_release_index(bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha)
+
+
+def test_release_index_rejects_manifest_digest_mismatch(tmp_path: Path) -> None:
+    bundle, source_sha = _bundle(tmp_path)
+    _rewrite_manifest(_manifest(bundle, "linux-x86_64"), sha256="0" * 64)
+    with pytest.raises(ValueError, match="artifact checksum mismatch"):
+        build_release_index(bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha)
+
+
+def test_release_index_rejects_manifest_size_mismatch(tmp_path: Path) -> None:
+    bundle, source_sha = _bundle(tmp_path)
+    _rewrite_manifest(_manifest(bundle, "linux-x86_64"), size=999999)
+    with pytest.raises(ValueError, match="artifact size mismatch"):
+        build_release_index(bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha)
+
+
+def test_release_index_requires_attestation_expectation(tmp_path: Path) -> None:
+    bundle, source_sha = _bundle(tmp_path)
+    _rewrite_manifest(
+        _manifest(bundle, "windows-x86_64"), github_attestation_expected=False
+    )
+    with pytest.raises(ValueError, match="must require GitHub attestation"):
+        build_release_index(bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha)
+
+
+def test_release_index_requires_matching_sbom(tmp_path: Path) -> None:
+    bundle, source_sha = _bundle(tmp_path)
+    sbom = bundle / "Boot-It-0.2.0-linux-x86_64.spdx.json"
+    sbom.unlink()
+    with pytest.raises(ValueError, match="exactly one SPDX SBOM"):
         build_release_index(bundle, version="0.2.0", tag="v0.2.0", source_sha=source_sha)
 
 
