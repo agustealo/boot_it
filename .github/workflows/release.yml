@@ -192,3 +192,24 @@ jobs:
             flags+=(--prerelease)
           fi
           gh release create "$RELEASE_TAG" dist/* "${flags[@]}"
+      - name: Re-download and verify published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          FINAL_RELEASE: ${{ inputs.final_release }}
+        run: |
+          rm -rf published-release
+          mkdir published-release
+          gh release download "$RELEASE_TAG" --dir published-release --clobber
+          python scripts/release_index.py --bundle-dir published-release --verify
+          gh release view "$RELEASE_TAG" --json tagName,targetCommitish,isPrerelease > published-release-metadata.json
+          expected_prerelease=true
+          if [ "$FINAL_RELEASE" = "true" ]; then
+            expected_prerelease=false
+          fi
+          python scripts/release_publication.py \
+            --metadata published-release-metadata.json \
+            --tag "$RELEASE_TAG" \
+            --source-sha "$GITHUB_SHA" \
+            --prerelease "$expected_prerelease"
