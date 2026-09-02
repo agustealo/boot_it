@@ -5,7 +5,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 CHUNK_SIZE = 4 * 1024 * 1024
 
@@ -83,12 +83,14 @@ def snapshot_verified_source(
     path: str,
     expected_sha256: str,
     expected_identity: SourceIdentity | None = None,
+    *,
+    cancel_check: Callable[[], None] | None = None,
 ) -> SourceSnapshot:
-    """Copy verified source bytes into an anonymous temporary file before target mutation.
+    """Copy approved bytes into an anonymous private file before target mutation.
 
     The returned handle, not the original pathname, becomes the authoritative byte
-    stream for both write and post-write verification. The snapshot is private to
-    this process and is removed automatically when closed.
+    stream for both write and post-write verification. The snapshot is removed
+    automatically when closed. ``cancel_check`` may raise to abort long copies.
     """
 
     source = Path(path)
@@ -104,10 +106,14 @@ def snapshot_verified_source(
             if expected_identity is not None and before != expected_identity:
                 raise RuntimeError("Source image file identity changed before snapshot creation.")
             while chunk := source_handle.read(CHUNK_SIZE):
+                if cancel_check is not None:
+                    cancel_check()
                 snapshot.write(chunk)
                 digest.update(chunk)
             after = _identity_from_stat(os.fstat(source_handle.fileno()))
 
+        if cancel_check is not None:
+            cancel_check()
         if before != after:
             raise RuntimeError("Source image changed while Boot It was sealing the write snapshot.")
         actual = digest.hexdigest()
