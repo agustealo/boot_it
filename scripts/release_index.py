@@ -9,6 +9,7 @@ from pathlib import Path
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 INDEX_NAME = "release-index.json"
 INDEX_CHECKSUM_NAME = f"{INDEX_NAME}.sha256"
+SUPPORTED_PLATFORMS = frozenset({"linux-x86_64", "windows-x86_64"})
 
 
 def sha256_file(path: Path) -> str:
@@ -52,6 +53,79 @@ def _parse_checksum(path: Path) -> tuple[str, str]:
     return parts[0].lower(), filename
 
 
+def _validate_platform_manifests(
+    manifests: list[Path],
+    by_name: dict[str, Path],
+    *,
+    version: str,
+    source_sha: str,
+) -> None:
+    seen_platforms: set[str] = set()
+    for manifest_path in manifests:
+        manifest = _load_json(manifest_path)
+        artifact = manifest.get("artifact")
+        if not isinstance(artifact, str) or not artifact or Path(artifact).name != artifact:
+            raise ValueError(f"Platform manifest {manifest_path.name} has an invalid artifact filename.")
+        if manifest_path.name != f"{artifact}.json":
+            raise ValueError(
+                f"Platform manifest {manifest_path.name} does not match artifact {artifact!r}."
+            )
+
+        platform_name = manifest.get("build_platform")
+        if platform_name not in SUPPORTED_PLATFORMS:
+            raise ValueError(
+                f"Platform manifest {manifest_path.name} has unsupported build_platform {platform_name!r}."
+            )
+        assert isinstance(platform_name, str)
+        if platform_name in seen_platforms:
+            raise ValueError(f"Duplicate release platform manifest for {platform_name!r}.")
+        seen_platforms.add(platform_name)
+
+        if manifest.get("version") != version:
+            raise ValueError(f"Platform manifest {manifest_path.name} version mismatch.")
+        manifest_source_sha = str(manifest.get("source_sha") or "").lower()
+        if manifest_source_sha != source_sha.lower():
+            raise ValueError(f"Platform manifest {manifest_path.name} source SHA mismatch.")
+        if manifest.get("source_ref") != "refs/heads/main":
+            raise ValueError(f"Platform manifest {manifest_path.name} source ref mismatch.")
+        if manifest.get("github_attestation_expected") is not True:
+            raise ValueError(
+                f"Platform manifest {manifest_path.name} must require GitHub attestation for a release candidate."
+            )
+
+        target = by_name.get(artifact)
+        if target is None or not target.is_file():
+            raise ValueError(f"Platform manifest {manifest_path.name} references missing artifact {artifact!r}.")
+        digest = manifest.get("sha256")
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise ValueError(f"Platform manifest {manifest_path.name} has invalid artifact SHA-256.")
+        actual_digest = sha256_file(target)
+        if digest.lower() != actual_digest:
+            raise ValueError(f"Platform manifest {manifest_path.name} artifact checksum mismatch.")
+        size = manifest.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ValueError(f"Platform manifest {manifest_path.name} has invalid artifact size.")
+        if size != target.stat().st_size:
+            raise ValueError(f"Platform manifest {manifest_path.name} artifact size mismatch.")
+
+        checksum_name = f"{artifact}.sha256"
+        if checksum_name not in by_name:
+            raise ValueError(f"Platform manifest {manifest_path.name} is missing checksum {checksum_name!r}.")
+        sbom_name = f"{artifact}.spdx.json"
+        if sbom_name not in by_name:
+            raise ValueError(f"Platform manifest {manifest_path.name} is missing SBOM {sbom_name!r}.")
+
+    missing_platforms = sorted(SUPPORTED_PLATFORMS - seen_platforms)
+    extra_platforms = sorted(seen_platforms - SUPPORTED_PLATFORMS)
+    if missing_platforms or extra_platforms:
+        details: list[str] = []
+        if missing_platforms:
+            details.append("missing " + ", ".join(missing_platforms))
+        if extra_platforms:
+            details.append("unexpected " + ", ".join(extra_platforms))
+        raise ValueError("Release platform manifest set mismatch: " + "; ".join(details))
+
+
 def build_release_index(
     bundle_dir: Path,
     *,
@@ -88,12 +162,12 @@ def build_release_index(
     ]
     sboms = [path for path in files if path.name.endswith(".spdx.json")]
     checksums = [path for path in files if path.name.endswith(".sha256")]
-    if len(manifests) < 2:
-        raise ValueError("Release bundle must contain platform manifests for both supported package lanes.")
-    if len(sboms) < 2:
-        raise ValueError("Release bundle must contain SPDX SBOMs for both supported package lanes.")
-    if len(checksums) < 2:
-        raise ValueError("Release bundle must contain checksum sidecars for both supported package lanes.")
+    if len(manifests) != len(SUPPORTED_PLATFORMS):
+        raise ValueError("Release bundle must contain exactly one manifest for each supported package lane.")
+    if len(sboms) != len(SUPPORTED_PLATFORMS):
+        raise ValueError("Release bundle must contain exactly one SPDX SBOM for each supported package lane.")
+    if len(checksums) != len(SUPPORTED_PLATFORMS):
+        raise ValueError("Release bundle must contain exactly one checksum sidecar for each supported package lane.")
 
     by_name = {path.name: path for path in files}
     for checksum_path in checksums:
@@ -104,6 +178,13 @@ def build_release_index(
         actual_digest = sha256_file(target)
         if actual_digest != expected_digest:
             raise ValueError(f"Checksum mismatch for {filename!r} while building release index.")
+
+    _validate_platform_manifests(
+        manifests,
+        by_name,
+        version=version,
+        source_sha=source_sha,
+    )
 
     entries = [
         {
@@ -120,10 +201,12 @@ def build_release_index(
         "source_sha": source_sha.lower(),
         "source_ref": "refs/heads/main",
         "prerelease": bool(contract.get("prerelease")),
+        "platforms": sorted(SUPPORTED_PLATFORMS),
         "files": entries,
         "verification": {
             "checksums": "Verify SHA256SUMS and individual .sha256 sidecars before execution.",
             "release_index": f"Verify {INDEX_CHECKSUM_NAME}, then require every published payload file to match this index exactly.",
+            "manifests": "Require one supported-platform manifest per executable and cross-check its source identity, size, digest, SBOM, checksum sidecar, and attestation expectation.",
             "attestations": "Verify GitHub artifact attestations for each executable and its SPDX SBOM.",
             "windows_authenticode": "When signed, verify the Windows executable Authenticode signature and timestamp independently.",
         },
@@ -159,6 +242,8 @@ def verify_release_payload(bundle_dir: Path, *, index_name: str = INDEX_NAME) ->
     index = _load_json(index_path)
     if index.get("schema") != "boot-it-release-index-v1":
         raise ValueError("Unsupported release index schema.")
+    if index.get("platforms") != sorted(SUPPORTED_PLATFORMS):
+        raise ValueError("Release index supported platform set mismatch.")
     entries = index.get("files")
     if not isinstance(entries, list) or not entries:
         raise ValueError("Release index must contain a non-empty files list.")
@@ -190,11 +275,7 @@ def verify_release_payload(bundle_dir: Path, *, index_name: str = INDEX_NAME) ->
             raise ValueError(f"Release index checksum mismatch for {name!r}.")
         expected_names.add(name)
 
-    actual_names = {
-        path.name
-        for path in bundle_dir.iterdir()
-        if path.is_file()
-    }
+    actual_names = {path.name for path in bundle_dir.iterdir() if path.is_file()}
     required_names = expected_names | {index_path.name, checksum_path.name}
     missing = sorted(required_names - actual_names)
     extra = sorted(actual_names - required_names)
