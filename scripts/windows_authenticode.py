@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ class SigningConfig:
 class SigningReport:
     signed: bool
     signature_status: str
+    binary_sha256: str
     signer_thumbprint: str | None = None
     signer_subject: str | None = None
     timestamped: bool = False
@@ -35,6 +37,14 @@ class SigningReport:
     timestamp_thumbprint: str | None = None
     digest_algorithm: str | None = None
     timestamp_digest_algorithm: str | None = None
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def normalize_thumbprint(value: str) -> str:
@@ -131,7 +141,11 @@ def sign_and_verify(binary: Path, config: SigningConfig, *, signtool: str | None
     if not binary.is_file():
         raise FileNotFoundError(binary)
     if not config.enabled:
-        return SigningReport(signed=False, signature_status="unsigned; Authenticode credentials not configured")
+        return SigningReport(
+            signed=False,
+            signature_status="unsigned; Authenticode credentials not configured",
+            binary_sha256=sha256_file(binary),
+        )
 
     tool = signtool or find_signtool()
     try:
@@ -186,6 +200,7 @@ def sign_and_verify(binary: Path, config: SigningConfig, *, signtool: str | None
     return SigningReport(
         signed=True,
         signature_status="Authenticode signature verified with pinned signer and RFC 3161 timestamp",
+        binary_sha256=sha256_file(binary),
         signer_thumbprint=signer_thumbprint,
         signer_subject=str(metadata.get("SignerSubject") or "") or None,
         timestamped=True,
