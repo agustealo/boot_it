@@ -61,6 +61,18 @@ def test_release_workflow_verifies_exact_payload_before_publication() -> None:
     assert "--prerelease" in text
 
 
+def test_release_workflow_verifies_published_assets_after_creation() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    release_create = text.index("gh release create")
+    redownload = text.index("gh release download")
+    published_verify = text.index("scripts/release_index.py --bundle-dir published-release --verify")
+    metadata_view = text.index("gh release view")
+    metadata_verify = text.index("scripts/release_publication.py")
+    assert release_create < redownload < published_verify < metadata_view < metadata_verify
+    assert "tagName,targetCommitish,isPrerelease" in text
+    assert "--source-sha \"$GITHUB_SHA\"" in text
+
+
 def test_windows_authenticode_runs_before_packaging_and_attestation() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     sign_index = text.index("Sign and verify Windows Authenticode when configured")
