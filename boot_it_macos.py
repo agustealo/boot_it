@@ -252,6 +252,18 @@ def _stop_privileged_process(process: subprocess.Popen) -> None:
         process.wait(timeout=3)
 
 
+def _settle_cancelled_process(process: subprocess.Popen) -> None:
+    """Let the privileged reader observe FIFO EOF, then reap its wrapper."""
+    if process.poll() is not None:
+        process.communicate()
+        return
+    try:
+        process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        _stop_privileged_process(process)
+        process.communicate()
+
+
 def _open_fifo_writer(fifo_path: str, process: subprocess.Popen, cancel_event) -> int:
     while True:
         if cancel_event.is_set():
@@ -313,6 +325,7 @@ def _run_privileged_stream(
         fd: int | None = None
         sent = 0
         broken_pipe = False
+        cancelled: OperationCancelled | None = None
         try:
             fd = _open_fifo_writer(fifo_path, process, cancel_event)
             while True:
@@ -332,15 +345,18 @@ def _run_privileged_stream(
                     break
                 sent += len(chunk)
                 progress_callback(sent, size)
-        except OperationCancelled:
-            _stop_privileged_process(process)
-            raise
+        except OperationCancelled as exc:
+            cancelled = exc
         finally:
             if fd is not None:
                 try:
                     os.close(fd)
                 except OSError:
                     pass
+
+        if cancelled is not None:
+            _settle_cancelled_process(process)
+            raise cancelled
 
         stdout, stderr = process.communicate()
         del stdout
