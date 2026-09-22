@@ -121,18 +121,18 @@ def test_discovery_uses_external_physical_inventory_and_preserves_blocked_target
     def fake_run(command: list[str]):
         key = tuple(command)
         calls.append(key)
-        if key == ("diskutil", "list", "-plist", "external", "physical"):
+        if key == (boot_it_macos.DISKUTIL, "list", "-plist", "external", "physical"):
             return {
                 "AllDisksAndPartitions": [
                     {"DeviceIdentifier": "disk4"},
                     {"DeviceIdentifier": "disk5"},
                 ]
             }
-        if key == ("diskutil", "info", "-plist", "/"):
+        if key == (boot_it_macos.DISKUTIL, "info", "-plist", "/"):
             return {"Internal": True}
-        if key == ("diskutil", "info", "-plist", "disk4"):
+        if key == (boot_it_macos.DISKUTIL, "info", "-plist", "disk4"):
             return _info(DeviceIdentifier="disk4", DeviceNode="/dev/disk4")
-        if key == ("diskutil", "info", "-plist", "disk5"):
+        if key == (boot_it_macos.DISKUTIL, "info", "-plist", "disk5"):
             return _info(
                 DeviceIdentifier="disk5",
                 DeviceNode="/dev/disk5",
@@ -148,7 +148,7 @@ def test_discovery_uses_external_physical_inventory_and_preserves_blocked_target
     assert drives[0].safe
     assert not drives[1].safe
     assert drives[1].reason == "virtual disk"
-    assert ("diskutil", "list", "-plist", "external", "physical") in calls
+    assert (boot_it_macos.DISKUTIL, "list", "-plist", "external", "physical") in calls
 
 
 def test_external_root_resolves_apfs_physical_store_and_blocks_it(
@@ -156,29 +156,29 @@ def test_external_root_resolves_apfs_physical_store_and_blocks_it(
 ) -> None:
     def fake_run(command: list[str]):
         key = tuple(command)
-        if key == ("diskutil", "list", "-plist", "external", "physical"):
+        if key == (boot_it_macos.DISKUTIL, "list", "-plist", "external", "physical"):
             return {"AllDisksAndPartitions": [{"DeviceIdentifier": "disk7"}]}
-        if key == ("diskutil", "info", "-plist", "/"):
+        if key == (boot_it_macos.DISKUTIL, "info", "-plist", "/"):
             return {
                 "Internal": False,
                 "DeviceIdentifier": "disk9s1",
                 "WholeDisk": False,
                 "ParentWholeDisk": "disk9",
             }
-        if key == ("diskutil", "info", "-plist", "disk9"):
+        if key == (boot_it_macos.DISKUTIL, "info", "-plist", "disk9"):
             return {
                 "DeviceIdentifier": "disk9",
                 "WholeDisk": True,
                 "VirtualOrPhysical": "Virtual",
                 "APFSPhysicalStores": [{"APFSPhysicalStore": "disk7s2"}],
             }
-        if key == ("diskutil", "info", "-plist", "disk7s2"):
+        if key == (boot_it_macos.DISKUTIL, "info", "-plist", "disk7s2"):
             return {
                 "DeviceIdentifier": "disk7s2",
                 "WholeDisk": False,
                 "ParentWholeDisk": "disk7",
             }
-        if key == ("diskutil", "info", "-plist", "disk7"):
+        if key == (boot_it_macos.DISKUTIL, "info", "-plist", "disk7"):
             return _info(DeviceIdentifier="disk7", DeviceNode="/dev/disk7")
         raise AssertionError(f"unexpected command: {command}")
 
