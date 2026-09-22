@@ -107,11 +107,12 @@ def _progress(label: str):
 def _perform_cancel_probe(drive: DriveInfo, image: Path, cancel_after_bytes: int) -> None:
     cancel_event = threading.Event()
     observed = 0
+    progress = _progress("cancel-probe write")
 
     def report(done: int, total: int) -> None:
         nonlocal observed
         observed = done
-        _progress("cancel-probe write")(done, total)
+        progress(done, total)
         if done >= cancel_after_bytes:
             cancel_event.set()
 
