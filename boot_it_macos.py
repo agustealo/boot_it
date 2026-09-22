@@ -87,7 +87,7 @@ def _protected_root_disks() -> tuple[set[str], bool]:
     except (OSError, subprocess.CalledProcessError, plistlib.InvalidFileException):
         return set(), False
 
-    if bool(root_info.get("Internal")):
+    if root_info.get("Internal") is True:
         return set(), True
 
     protected = _physical_backing_disks(root_info)
@@ -110,8 +110,9 @@ def classify_macos_drive(
         or "External disk"
     ).strip()
     bus = str(info.get("BusProtocol") or info.get("Protocol") or "unknown").strip()
-    internal = bool(info.get("Internal"))
-    external = bool(info.get("RemovableMediaOrExternalDevice")) or not internal
+    internal_value = info.get("Internal")
+    internal = internal_value is True
+    external = bool(info.get("RemovableMediaOrExternalDevice")) or internal_value is False
     removable = bool(info.get("RemovableMedia") or info.get("Removable"))
     virtual = _is_virtual(info)
     writable = bool(info.get("WritableMedia", info.get("Writable", False)))
@@ -140,9 +141,11 @@ def classify_macos_drive(
     elif size <= 0:
         reason = "invalid capacity"
 
+    # Use only hardware/topology identifiers that survive a destructive rewrite.
+    # Filesystem/media identifiers such as DiskUUID/MediaUUID are intentionally
+    # excluded because Boot It itself can replace them while writing an image.
     hardware_parts = [
         str(info.get("DeviceTreePath") or "").strip(),
-        str(info.get("DiskUUID") or info.get("MediaUUID") or "").strip(),
         str(info.get("IORegistryEntryName") or "").strip(),
     ]
     hardware_id = " | ".join(part for part in hardware_parts if part)
