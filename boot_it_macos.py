@@ -40,13 +40,7 @@ def _is_virtual(info: Mapping[str, Any]) -> bool:
 
 
 def _physical_backing_disks(info: Mapping[str, Any], seen: set[str] | None = None) -> set[str]:
-    """Resolve a diskutil description to physical whole-disk identifiers.
-
-    APFS volumes and synthesized containers can sit between the root filesystem and
-    its physical store. This resolver walks ``APFSPhysicalStores`` and whole-disk
-    parent references until a non-virtual whole disk is reached.
-    """
-
+    """Resolve a diskutil description to physical whole-disk identifiers."""
     visited = seen if seen is not None else set()
     identifier = str(info.get("DeviceIdentifier") or "").strip()
     if identifier:
@@ -72,15 +66,10 @@ def _physical_backing_disks(info: Mapping[str, Any], seen: set[str] | None = Non
         if resolved:
             return resolved
 
-    whole = bool(info.get("WholeDisk"))
-    if whole and identifier and not _is_virtual(info):
+    if bool(info.get("WholeDisk")) and identifier and not _is_virtual(info):
         return {identifier}
 
-    parent = str(
-        info.get("ParentWholeDisk")
-        or info.get("PartOfWhole")
-        or ""
-    ).strip()
+    parent = str(info.get("ParentWholeDisk") or info.get("PartOfWhole") or "").strip()
     if parent and parent != identifier:
         try:
             parent_info = _run_plist(["diskutil", "info", "-plist", parent])
@@ -92,13 +81,7 @@ def _physical_backing_disks(info: Mapping[str, Any], seen: set[str] | None = Non
 
 
 def _protected_root_disks() -> tuple[set[str], bool]:
-    """Return external physical disks backing the current macOS root filesystem.
-
-    Internal root media is already excluded by the external-disk inventory. When
-    macOS itself is booted from external media, however, the external physical
-    backing disk must be identified explicitly or discovery fails closed.
-    """
-
+    """Return external physical disks backing the current macOS root filesystem."""
     try:
         root_info = _run_plist(["diskutil", "info", "-plist", "/"])
     except (OSError, subprocess.CalledProcessError, plistlib.InvalidFileException):
@@ -118,7 +101,6 @@ def classify_macos_drive(
     topology_resolved: bool = True,
 ) -> DriveInfo | None:
     """Convert ``diskutil info -plist`` data into Boot It's canonical target model."""
-
     identifier = str(info.get("DeviceIdentifier") or "").strip()
     device = str(info.get("DeviceNode") or (f"/dev/{identifier}" if identifier else "")).strip()
     size = int(info.get("TotalSize") or info.get("Size") or info.get("IOKitSize") or 0)
@@ -182,12 +164,10 @@ def classify_macos_drive(
 
 
 def discover_macos_drives() -> list[DriveInfo]:
-    """Discover safe-candidate external physical disks using machine-readable diskutil data."""
-
+    """Discover external physical disks using machine-readable diskutil data."""
     inventory = _run_plist(["diskutil", "list", "-plist", "external", "physical"])
     protected, topology_resolved = _protected_root_disks()
     drives: list[DriveInfo] = []
-
     entries = inventory.get("AllDisksAndPartitions") or []
     if not isinstance(entries, list):
         raise RuntimeError("diskutil returned an invalid external-disk inventory.")
@@ -209,13 +189,11 @@ def discover_macos_drives() -> list[DriveInfo]:
         )
         if drive is not None:
             drives.append(drive)
-
     return drives
 
 
 def macos_raw_device(device: str) -> str:
     """Return the raw whole-disk character-device path used for high-throughput I/O."""
-
     prefix = "/dev/"
     if not device.startswith(prefix):
         raise ValueError("macOS target must be a /dev/diskN whole-disk path.")
@@ -263,14 +241,21 @@ def _authorization_error(stderr: str) -> Exception:
     return RuntimeError(f"macOS privileged disk operation failed: {stderr.strip() or 'unknown error'}")
 
 
-def _open_fifo_writer(
-    fifo_path: str,
-    process: subprocess.Popen,
-    cancel_event,
-) -> int:
+def _stop_privileged_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
+
+
+def _open_fifo_writer(fifo_path: str, process: subprocess.Popen, cancel_event) -> int:
     while True:
         if cancel_event.is_set():
-            process.terminate()
+            _stop_privileged_process(process)
             raise OperationCancelled("Operation cancelled before privileged disk access began.")
         try:
             return os.open(fifo_path, os.O_WRONLY | os.O_NONBLOCK)
@@ -309,23 +294,15 @@ def _run_privileged_stream(
     *,
     verification: bool,
 ) -> None:
-    """Stream trusted bytes through a FIFO to a macOS administrator-authorized command.
-
-    The privileged process receives only the byte stream and raw target path. It
-    never receives the original image pathname, preserving Boot It's sealed-source
-    trust boundary while allowing the native macOS authorization dialog to own
-    credential collection.
-    """
-
+    """Stream trusted bytes through a private FIFO to an authorized macOS helper."""
     source.seek(0)
     with tempfile.TemporaryDirectory(prefix="boot-it-macos-") as workdir:
         os.chmod(workdir, 0o700)
         fifo_path = os.path.join(workdir, "source.fifo")
         os.mkfifo(fifo_path, 0o600)
         shell_command = shell_command_builder(fifo_path)
-        script = _apple_script_for_command(shell_command)
         process = subprocess.Popen(
-            ["/usr/bin/osascript", "-e", script],
+            ["/usr/bin/osascript", "-e", _apple_script_for_command(shell_command)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -355,28 +332,15 @@ def _run_privileged_stream(
                     break
                 sent += len(chunk)
                 progress_callback(sent, size)
+        except OperationCancelled:
+            _stop_privileged_process(process)
+            raise
         finally:
             if fd is not None:
                 try:
                     os.close(fd)
                 except OSError:
                     pass
-
-        if cancel_event.is_set():
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=3)
-            raise OperationCancelled(
-                "Verification cancelled. Boot It cannot certify this USB."
-                if verification
-                else "Write cancelled. The USB contains a partial image and must be rewritten before use."
-            )
 
         stdout, stderr = process.communicate()
         del stdout
@@ -429,9 +393,7 @@ def macos_verify_stream(
     raw_device = macos_raw_device(device)
 
     def command(fifo_path: str) -> str:
-        return (
-            f"exec /usr/bin/cmp -n {size} {shlex.quote(fifo_path)} {shlex.quote(raw_device)}"
-        )
+        return f"exec /usr/bin/cmp -n {size} {shlex.quote(fifo_path)} {shlex.quote(raw_device)}"
 
     _run_privileged_stream(
         source,
@@ -443,23 +405,13 @@ def macos_verify_stream(
     )
 
 
-def macos_write(
-    image: str,
-    device: str,
-    progress_callback,
-    cancel_event,
-) -> None:
+def macos_write(image: str, device: str, progress_callback, cancel_event) -> None:
     size = Path(image).stat().st_size
     with open(image, "rb") as source:
         macos_write_stream(source, size, device, progress_callback, cancel_event)
 
 
-def macos_verify(
-    image: str,
-    device: str,
-    progress_callback,
-    cancel_event,
-) -> None:
+def macos_verify(image: str, device: str, progress_callback, cancel_event) -> None:
     size = Path(image).stat().st_size
     with open(image, "rb") as source:
         macos_verify_stream(source, size, device, progress_callback, cancel_event)
