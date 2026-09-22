@@ -41,6 +41,25 @@ def test_external_nonremovable_physical_disk_is_a_safe_candidate() -> None:
     assert "DeviceTree" in drive.hardware_id
 
 
+def test_missing_external_internal_classification_fails_closed() -> None:
+    payload = _info()
+    payload.pop("Internal")
+    payload.pop("RemovableMediaOrExternalDevice")
+    drive = classify_macos_drive(payload)
+    assert drive is not None
+    assert not drive.safe
+    assert drive.reason == "not an external disk"
+
+
+def test_media_uuid_changes_do_not_change_hardware_identity() -> None:
+    first = classify_macos_drive(_info(DiskUUID="BEFORE-WRITE"))
+    second = classify_macos_drive(_info(DiskUUID="AFTER-WRITE"))
+    assert first is not None and second is not None
+    assert first.hardware_id == second.hardware_id
+    assert first.identity == second.identity
+    assert "BEFORE-WRITE" not in first.hardware_id
+
+
 def test_virtual_disk_image_is_blocked_even_when_external() -> None:
     drive = classify_macos_drive(
         _info(VirtualOrPhysical="Virtual", BusProtocol="Disk Image", Ejectable=True)
