@@ -130,7 +130,7 @@ def classify_macos_drive(
     bus = str(info.get("BusProtocol") or info.get("Protocol") or "unknown").strip()
     internal = bool(info.get("Internal"))
     external = bool(info.get("RemovableMediaOrExternalDevice")) or not internal
-    removable = bool(info.get("RemovableMedia") or info.get("Removable") or info.get("Ejectable"))
+    removable = bool(info.get("RemovableMedia") or info.get("Removable"))
     virtual = _is_virtual(info)
     writable = bool(info.get("WritableMedia", info.get("Writable", False)))
     whole = bool(info.get("WholeDisk"))
