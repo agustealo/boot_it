@@ -14,6 +14,10 @@ from typing import Any, BinaryIO, Callable, Mapping
 from boot_it_models import DriveInfo, OperationCancelled
 
 CHUNK_SIZE = 4 * 1024 * 1024
+DISKUTIL = "/usr/sbin/diskutil"
+OSASCRIPT = "/usr/bin/osascript"
+DD = "/bin/dd"
+CMP = "/usr/bin/cmp"
 
 
 def _run_plist(command: list[str]) -> dict[str, Any]:
@@ -59,7 +63,7 @@ def _physical_backing_disks(info: Mapping[str, Any], seen: set[str] | None = Non
             if not store_id:
                 continue
             try:
-                store_info = _run_plist(["diskutil", "info", "-plist", store_id])
+                store_info = _run_plist([DISKUTIL, "info", "-plist", store_id])
             except (OSError, subprocess.CalledProcessError, plistlib.InvalidFileException):
                 continue
             resolved.update(_physical_backing_disks(store_info, visited))
@@ -72,7 +76,7 @@ def _physical_backing_disks(info: Mapping[str, Any], seen: set[str] | None = Non
     parent = str(info.get("ParentWholeDisk") or info.get("PartOfWhole") or "").strip()
     if parent and parent != identifier:
         try:
-            parent_info = _run_plist(["diskutil", "info", "-plist", parent])
+            parent_info = _run_plist([DISKUTIL, "info", "-plist", parent])
         except (OSError, subprocess.CalledProcessError, plistlib.InvalidFileException):
             return set()
         return _physical_backing_disks(parent_info, visited)
@@ -83,7 +87,7 @@ def _physical_backing_disks(info: Mapping[str, Any], seen: set[str] | None = Non
 def _protected_root_disks() -> tuple[set[str], bool]:
     """Return external physical disks backing the current macOS root filesystem."""
     try:
-        root_info = _run_plist(["diskutil", "info", "-plist", "/"])
+        root_info = _run_plist([DISKUTIL, "info", "-plist", "/"])
     except (OSError, subprocess.CalledProcessError, plistlib.InvalidFileException):
         return set(), False
 
@@ -168,7 +172,7 @@ def classify_macos_drive(
 
 def discover_macos_drives() -> list[DriveInfo]:
     """Discover external physical disks using machine-readable diskutil data."""
-    inventory = _run_plist(["diskutil", "list", "-plist", "external", "physical"])
+    inventory = _run_plist([DISKUTIL, "list", "-plist", "external", "physical"])
     protected, topology_resolved = _protected_root_disks()
     drives: list[DriveInfo] = []
     entries = inventory.get("AllDisksAndPartitions") or []
@@ -182,7 +186,7 @@ def discover_macos_drives() -> list[DriveInfo]:
         if not identifier:
             continue
         try:
-            info = _run_plist(["diskutil", "info", "-plist", identifier])
+            info = _run_plist([DISKUTIL, "info", "-plist", identifier])
         except (OSError, subprocess.CalledProcessError, plistlib.InvalidFileException):
             continue
         drive = classify_macos_drive(
@@ -210,7 +214,7 @@ def macos_raw_device(device: str) -> str:
 
 def macos_unmount(device: str) -> None:
     subprocess.run(
-        ["diskutil", "unmountDisk", device],
+        [DISKUTIL, "unmountDisk", device],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -220,7 +224,7 @@ def macos_unmount(device: str) -> None:
 
 def macos_eject(device: str) -> None:
     subprocess.run(
-        ["diskutil", "eject", device],
+        [DISKUTIL, "eject", device],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -317,7 +321,7 @@ def _run_privileged_stream(
         os.mkfifo(fifo_path, 0o600)
         shell_command = shell_command_builder(fifo_path)
         process = subprocess.Popen(
-            ["/usr/bin/osascript", "-e", _apple_script_for_command(shell_command)],
+            [OSASCRIPT, "-e", _apple_script_for_command(shell_command)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -388,7 +392,7 @@ def macos_write_stream(
 
     def command(fifo_path: str) -> str:
         return (
-            f"exec /bin/dd if={shlex.quote(fifo_path)} of={shlex.quote(raw_device)} "
+            f"exec {DD} if={shlex.quote(fifo_path)} of={shlex.quote(raw_device)} "
             "bs=4m status=none conv=fsync"
         )
 
@@ -412,7 +416,7 @@ def macos_verify_stream(
     raw_device = macos_raw_device(device)
 
     def command(fifo_path: str) -> str:
-        return f"exec /usr/bin/cmp -n {size} {shlex.quote(fifo_path)} {shlex.quote(raw_device)}"
+        return f"exec {CMP} -n {size} {shlex.quote(fifo_path)} {shlex.quote(raw_device)}"
 
     _run_privileged_stream(
         source,
