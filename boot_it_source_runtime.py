@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from types import ModuleType
 
+from boot_it_macos import macos_verify_stream, macos_write_stream
 from boot_it_source import SourceIdentity, SourceSnapshot, snapshot_verified_source
 
 
@@ -158,6 +159,8 @@ def install_source_seal(core: ModuleType) -> None:
     original_worker_run = worker_type.run
     original_linux_write = core.linux_write
     original_linux_verify = core.linux_verify
+    original_macos_write = core.macos_write
+    original_macos_verify = core.macos_verify
     original_windows_write = core.windows_write
     original_windows_verify = core.windows_verify
 
@@ -221,6 +224,32 @@ def install_source_seal(core: ModuleType) -> None:
             parse_dd_progress=False,
         )
 
+    def macos_write(image, device, progress_callback, cancel_event):
+        snapshot = current_snapshot(image)
+        if snapshot is None:
+            return original_macos_write(image, device, progress_callback, cancel_event)
+        snapshot.rewind()
+        macos_write_stream(
+            snapshot.handle,
+            snapshot.size,
+            device,
+            progress_callback,
+            cancel_event,
+        )
+
+    def macos_verify(image, device, progress_callback, cancel_event):
+        snapshot = current_snapshot(image)
+        if snapshot is None:
+            return original_macos_verify(image, device, progress_callback, cancel_event)
+        snapshot.rewind()
+        macos_verify_stream(
+            snapshot.handle,
+            snapshot.size,
+            device,
+            progress_callback,
+            cancel_event,
+        )
+
     def windows_write(image, device, progress_callback, cancel_event):
         snapshot = current_snapshot(image)
         if snapshot is None:
@@ -270,5 +299,7 @@ def install_source_seal(core: ModuleType) -> None:
     worker_type.run = worker_run
     core.linux_write = linux_write
     core.linux_verify = linux_verify
+    core.macos_write = macos_write
+    core.macos_verify = macos_verify
     core.windows_write = windows_write
     core.windows_verify = windows_verify

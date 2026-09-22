@@ -13,11 +13,19 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from PySide6 import QtCore, QtGui, QtWidgets
+
+from boot_it_macos import (
+    discover_macos_drives,
+    macos_eject,
+    macos_unmount,
+    macos_verify,
+    macos_write,
+)
+from boot_it_models import DriveInfo, OperationCancelled
 
 APP_NAME = "Boot It"
 CHUNK_SIZE = 4 * 1024 * 1024
@@ -30,41 +38,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 LOGGER = logging.getLogger("boot_it")
-
-
-class OperationCancelled(RuntimeError):
-    """Raised when a destructive operation is cancelled intentionally."""
-
-
-@dataclass(frozen=True)
-class DriveInfo:
-    device: str
-    size: int
-    model: str
-    bus: str
-    removable: bool
-    safe: bool
-    reason: str = ""
-    hardware_id: str = ""
-
-    @property
-    def size_gib(self) -> float:
-        return self.size / (1024**3)
-
-    @property
-    def label(self) -> str:
-        suffix = "" if self.safe else f" [blocked: {self.reason}]"
-        return f"{self.model or 'USB drive'} · {self.size_gib:.2f} GiB · {self.device}{suffix}"
-
-    @property
-    def identity(self) -> tuple[str, int, str, str, str]:
-        return (
-            self.device,
-            self.size,
-            self.model.strip().casefold(),
-            self.bus.strip().casefold(),
-            self.hardware_id.strip().casefold(),
-        )
 
 
 def format_bytes(value: int) -> str:
@@ -167,6 +140,10 @@ def discover_linux_drives() -> list[DriveInfo]:
                 safe=safe,
                 reason=reason,
                 hardware_id=wwn or serial,
+                external=removable,
+                virtual=False,
+                writable=not read_only,
+                platform="Linux",
             )
         )
     return drives
@@ -221,6 +198,10 @@ def discover_windows_drives() -> list[DriveInfo]:
                 safe=not blocked_reason,
                 reason=blocked_reason,
                 hardware_id=hardware_id,
+                external=True,
+                virtual=False,
+                writable=not bool(item.get("IsReadOnly")),
+                platform="Windows",
             )
         )
     return drives
@@ -230,6 +211,8 @@ def discover_drives(system: str | None = None) -> list[DriveInfo]:
     detected = system or platform.system()
     if detected == "Linux":
         return discover_linux_drives()
+    if detected == "Darwin":
+        return discover_macos_drives()
     if detected == "Windows":
         return discover_windows_drives()
     raise RuntimeError(f"Unsupported operating system: {detected}")
@@ -493,6 +476,17 @@ class WriteWorker(QtCore.QThread):
                 self.status.emit("Verifying written bytes…")
                 linux_verify(self.image, drive.device, self._cancel_event)
                 self.progress.emit(100)
+            elif self.system == "Darwin":
+                self.status.emit("Unmounting target volumes…")
+                macos_unmount(drive.device)
+                _check_cancel(self._cancel_event)
+                self.status.emit("Writing image… macOS may request administrator authorization.")
+                macos_write(self.image, drive.device, self._emit_progress, self._cancel_event)
+                self.status.emit("Verifying written bytes…")
+                macos_verify(self.image, drive.device, self._emit_progress, self._cancel_event)
+                self.progress.emit(100)
+                self.status.emit("Ejecting verified target…")
+                macos_eject(drive.device)
             elif self.system == "Windows":
                 self.status.emit("Dismounting target volumes…")
                 windows_dismount(drive.device)
@@ -640,11 +634,11 @@ class BootItWindow(QtWidgets.QWidget):
         try:
             self.drives = discover_drives(self.system)
             if not self.drives:
-                self.drive_combo.addItem("No USB drives found")
+                self.drive_combo.addItem("No external targets found")
             else:
                 for drive in self.drives:
                     self.drive_combo.addItem(drive.label)
-            self._log(f"Found {len(self.drives)} USB target(s).")
+            self._log(f"Found {len(self.drives)} external target(s).")
         except Exception as exc:
             LOGGER.exception("Drive discovery failed")
             self.drive_combo.addItem("Drive discovery failed")
@@ -664,7 +658,7 @@ class BootItWindow(QtWidgets.QWidget):
             return
         drive = self._selected_drive()
         if not drive:
-            QtWidgets.QMessageBox.critical(self, APP_NAME, "Select a USB target.")
+            QtWidgets.QMessageBox.critical(self, APP_NAME, "Select an external target.")
             return
         if not drive.safe:
             QtWidgets.QMessageBox.critical(self, APP_NAME, f"This target is blocked: {drive.reason}.")

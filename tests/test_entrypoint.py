@@ -48,6 +48,8 @@ def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
     original_linux_discovery = boot_it.discover_linux_drives
     original_linux_write = boot_it.linux_write
     original_linux_verify = boot_it.linux_verify
+    original_macos_write = boot_it.macos_write
+    original_macos_verify = boot_it.macos_verify
     original_windows_write = boot_it.windows_write
     original_windows_verify = boot_it.windows_verify
     original_worker_run = boot_it.WriteWorker.run
@@ -64,6 +66,9 @@ def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
         assert boot_it.linux_write is not original_linux_write
         assert boot_it.linux_write.__module__ == "boot_it_source_runtime"
         assert boot_it.linux_verify is not original_linux_verify
+        assert boot_it.macos_write is not original_macos_write
+        assert boot_it.macos_write.__module__ == "boot_it_source_runtime"
+        assert boot_it.macos_verify is not original_macos_verify
         assert boot_it.windows_write is not original_windows_write
         assert boot_it.windows_verify is not original_windows_verify
         assert boot_it.WriteWorker.run is not original_worker_run
@@ -81,6 +86,8 @@ def test_canonical_launcher_installs_runtime_hardening_before_main() -> None:
         boot_it.discover_linux_drives = original_linux_discovery
         boot_it.linux_write = original_linux_write
         boot_it.linux_verify = original_linux_verify
+        boot_it.macos_write = original_macos_write
+        boot_it.macos_verify = original_macos_verify
         boot_it.windows_write = original_windows_write
         boot_it.windows_verify = original_windows_verify
         boot_it.WriteWorker.run = original_worker_run
